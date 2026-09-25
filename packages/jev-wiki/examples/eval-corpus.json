@@ -1,0 +1,113 @@
+{
+  "name": "jev-wiki-synthetic-v1",
+  "description": "Ten synthetic source documents and nine fixed retrieval queries. Query labels are never included in ingestion or provider state.",
+  "sources": [
+    {
+      "source_key": "pilot-database",
+      "title": "Pilot database decision",
+      "text": "For Kestrel's pilot deployment, the team selected one local SQLite database. A PostgreSQL migration is deferred until multi-user requirements are demonstrated."
+    },
+    {
+      "source_key": "printer-power",
+      "title": "Workshop equipment measurement",
+      "text": "The workshop printer draws 650 watts while heating its nozzle and bed."
+    },
+    {
+      "source_key": "mira-updates",
+      "title": "Communication preference",
+      "text": "Mira prefers short written updates with the decision in the opening sentence."
+    },
+    {
+      "source_key": "backup-procedure",
+      "title": "Restore procedure",
+      "text": "Before replacing the Cedar service database, create a backup and verify that it can be restored in a separate temporary directory."
+    },
+    {
+      "source_key": "cedar-signoff-noor",
+      "title": "Release ownership note A",
+      "text": "For the September 2026 Cedar release, Noor is the sole owner of production sign-off."
+    },
+    {
+      "source_key": "cedar-signoff-luis",
+      "title": "Release ownership note B",
+      "text": "For the September 2026 Cedar release, Luis is the sole owner of production sign-off."
+    },
+    {
+      "source_key": "atlas-location",
+      "title": "Archive location",
+      "text": "The Atlas archive is stored in cabinet B-17 in the west workshop."
+    },
+    {
+      "source_key": "petrol-vehicles",
+      "title": "Transport note",
+      "text": "Automobiles burn petrol."
+    },
+    {
+      "source_key": "menu",
+      "title": "Lunch offering",
+      "text": "The restaurant menu offers mushroom soup at lunchtime."
+    },
+    {
+      "source_key": "cloud-permission",
+      "title": "Upload decision",
+      "text": "For Kestrel's pilot, the team decided that sending customer transcripts to an external cloud service requires the customer's written permission."
+    }
+  ],
+  "queries": [
+    {
+      "id": "database-decision",
+      "category": "decision",
+      "query": "Which database was selected for Kestrel's pilot deployment?",
+      "expected_source_keys": ["pilot-database"]
+    },
+    {
+      "id": "power-synonym-anchor",
+      "category": "synonym_with_lexical_anchor",
+      "query": "How much electricity does the printer consume during warm-up?",
+      "expected_source_keys": ["printer-power"]
+    },
+    {
+      "id": "communication-preference",
+      "category": "preference",
+      "query": "How should progress reports be delivered to Mira?",
+      "expected_source_keys": ["mira-updates"]
+    },
+    {
+      "id": "backup-before-replace",
+      "category": "procedure",
+      "query": "What must happen before replacing the Cedar database?",
+      "expected_source_keys": ["backup-procedure"]
+    },
+    {
+      "id": "signoff-conflict",
+      "category": "unresolved_conflict",
+      "query": "Who owns production sign-off for the September 2026 Cedar release?",
+      "expected_source_keys": ["cedar-signoff-noor", "cedar-signoff-luis"],
+      "expected_conflict_pair": ["cedar-signoff-noor", "cedar-signoff-luis"]
+    },
+    {
+      "id": "archive-fact",
+      "category": "fact",
+      "query": "Where is the Atlas archive?",
+      "expected_source_keys": ["atlas-location"]
+    },
+    {
+      "id": "zero-overlap-synonym",
+      "category": "synonym_without_lexical_anchor",
+      "query": "Do cars consume gasoline?",
+      "expected_source_keys": ["petrol-vehicles"]
+    },
+    {
+      "id": "no-answer-with-anchor",
+      "category": "unanswerable_with_lexical_anchor",
+      "query": "Which vaccinations must Kestrel staff obtain?",
+      "expected_source_keys": []
+    },
+    {
+      "id": "no-answer-no-overlap",
+      "category": "unanswerable_without_lexical_anchor",
+      "query": "When will Neptune explode?",
+      "expected_source_keys": []
+    }
+  ]
+}
