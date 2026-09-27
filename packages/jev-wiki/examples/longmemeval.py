@@ -152,14 +152,16 @@ def shortlist_by_bm25(query: str, claims: list[dict]) -> list[dict]:
 def evaluate_policy(engine, provider, query, key_of, expected, answer_turns) -> dict:
     active = engine.store.claims()
     retained = {key_of[c["source_id"]] for c in active}
-    active_text = "\n".join(c["text"] for c in active)
     out = {
         "claims_active": len(active),
         "evidence_sessions_retained": len(expected & retained),
-        # Labelled answer turns with at least one paragraph inside an active claim.
+        # Labelled answer turns overlapped by an active claim from their own session.
         "answer_turns_active": sum(
-            any(p.strip() and p.strip() in active_text for p in turn.split("\n\n"))
-            for turn in answer_turns
+            any(
+                key_of[c["source_id"]] == key and c["start"] < stop and c["end"] > start
+                for c in active
+            )
+            for key, start, stop in answer_turns
         ),
     }
 
@@ -169,8 +171,12 @@ def evaluate_policy(engine, provider, query, key_of, expected, answer_turns) -> 
     lexical = engine.recall(query, limit=20, max_chars=20_000, offline=True)
     out["wiki_lexical"] = score_sessions(ranked(lexical), expected)
     live = engine.recall(query, limit=20, max_chars=20_000)
-    out["wiki_jev"] = score_sessions(ranked(live), expected)
-    out["wiki_jev"].update(mode=live["mode"], returned=len(live["items"]))
+    if live["degraded"]:
+        # The engine fell back to lexical order after a failed JEV call.
+        out["wiki_jev"] = {"error": "jev_rerank_failed", "mode": live["mode"]}
+    else:
+        out["wiki_jev"] = score_sessions(ranked(live), expected)
+        out["wiki_jev"].update(mode=live["mode"], returned=len(live["items"]))
     picked = shortlist_by_bm25(query, active)
     out["bm25_claims"] = score_sessions([key_of[c["source_id"]] for c in picked], expected)
     try:
@@ -233,13 +239,17 @@ def run_question(item: dict, model: str) -> dict:
         key_of = {s["id"]: s["source_key"] for s in engine.store.sources()}
         stored = engine.store.claims(active_only=False)
         row["claims_stored"] = len(stored)
-        answer_turns = [
-            t["content"].strip()
-            for sid, s in zip(item["haystack_session_ids"], item["haystack_sessions"])
-            if sid in expected_ids
-            for t in s
-            if t.get("has_answer") and t["role"] == "user"
-        ]
+        # (session key, start, end) of each labelled user answer turn in its source.
+        answer_turns = []
+        for key, sid, session, text in zip(
+            keys, item["haystack_session_ids"], item["haystack_sessions"], texts
+        ):
+            for turn in session:
+                if sid in expected_ids and turn.get("has_answer") and turn["role"] == "user":
+                    content = turn["content"].strip()
+                    start = text.find(content)
+                    if content and start != -1:
+                        answer_turns.append((key, start, start + len(content)))
         row["answer_turns"] = len(answer_turns)
         row["policies"] = {}
         for policy, threshold in POLICIES:
