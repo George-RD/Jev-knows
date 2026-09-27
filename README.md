@@ -1,3 +1,10 @@
+# Jev Knows
+
+The standalone wiki-first memory system is in **[packages/jev-wiki](packages/jev-wiki/README.md)**:
+immutable sources, cited Markdown, JEV decisions, and automatic agent capture/recall hooks.
+It runs independently of Cognee. The original Cognee code and documentation follow below
+as the comparison baseline.
+
 <div align="center">
   <a href="https://github.com/topoteretes/cognee">
     <img src="assets/cognee-logo.svg" alt="Cognee Logo" width="260">
