@@ -7,10 +7,12 @@ Byte budgets are deliberately conservative: they are not token estimates.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import math
 import os
 import re
+import stat
 import tempfile
 import time
 import urllib.error
@@ -73,10 +75,10 @@ def _json_bytes(value: object) -> bytes:
 def _number(value: object, low: float, high: float, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ProviderError(f"JEV response has a nonnumeric {field}")
-    result = float(value)
-    if not math.isfinite(result) or result < low or result > high:
+    # Compare before float conversion so enormous JSON integers cannot overflow.
+    if not low <= value <= high:
         raise ProviderError(f"JEV response has an out-of-range {field}")
-    return result
+    return float(value)
 
 
 def _wire_questions(questions: dict[str, dict]) -> dict[str, dict]:
@@ -200,6 +202,27 @@ def _validated_answers(raw: object, questions: dict[str, dict], model: str) -> d
     return result
 
 
+def _cache_record(raw: dict, questions: dict[str, dict]) -> dict:
+    """Persist only fields already checked by _validated_answers.
+
+    A valid envelope can still include untrusted debug echoes of source text or
+    credentials. Those extra fields must not turn the response cache into a log.
+    """
+    fields = {
+        "choice": ("type", "choice", "confidence", "probabilities"),
+        "score": ("type", "score", "confidence", "probabilities", "legend"),
+        "noul": ("type", "noul"),
+    }
+    return {
+        "model": raw["model"],
+        "answers": {
+            name: {key: raw["answers"][name][key] for key in fields[question["type"]]}
+            for name, question in questions.items()
+        },
+        "usage": {key: raw["usage"][key] for key in ("input_tokens", "output_tokens")},
+    }
+
+
 class JevProvider:
     """Real JEV provider. Calls are synchronous; independently named questions batch.
 
@@ -235,7 +258,7 @@ class JevProvider:
             raise ProviderError("Use a versioned JEV model or jev-latest/jev-preview")
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
             raise ProviderError("Timeout must be a positive number")
-        if not math.isfinite(timeout) or not 0 < timeout <= 120:
+        if not 0 < timeout <= 120 or not math.isfinite(timeout):
             raise ProviderError("Timeout must be greater than zero and at most 120 seconds")
         self._api_key = key
         self.model = model
@@ -303,10 +326,11 @@ class JevProvider:
         if cache_path is not None:
             try:
                 if cache_path.exists():
-                    if cache_path.stat().st_size > MAX_RESPONSE_BYTES:
-                        raise ProviderError("Cached response exceeds size limit")
-                    raw = json.loads(cache_path.read_text(encoding="utf-8"))
+                    raw = self._read_cache(cache_path)
                     result = _validated_answers(raw, questions, self.model)
+                    clean = _cache_record(raw, questions)
+                    if clean != raw:
+                        self._write_cache(cache_path, clean)
                     self.telemetry["cache_hits"] += 1
                     self.last_model = raw["model"]
                     return result
@@ -319,7 +343,7 @@ class JevProvider:
         self.telemetry["output_tokens"] += raw["usage"]["output_tokens"]
         self.last_model = raw["model"]
         if cache_path is not None:
-            self._write_cache(cache_path, raw)
+            self._write_cache(cache_path, _cache_record(raw, questions))
         return result
 
     def _cache_path(self, payload: bytes) -> Path | None:
@@ -329,16 +353,31 @@ class JevProvider:
         digest = hashlib.sha256(identity).hexdigest()
         return self.cache_dir / f"v{self.CACHE_VERSION}-{digest}.json"
 
+    def _read_cache(self, path: Path) -> dict:
+        if path.parent.is_symlink():
+            raise ProviderError("Cache directory must not be a symlink")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_RESPONSE_BYTES:
+                raise ProviderError("Cached response must be a bounded regular file")
+            data = handle.read(MAX_RESPONSE_BYTES + 1)
+            if len(data) > MAX_RESPONSE_BYTES:
+                raise ProviderError("Cached response exceeds size limit")
+        return json.loads(data)
+
     def _write_cache(self, path: Path, raw: dict) -> None:
         temporary = None
         try:
+            if path.parent.is_symlink():
+                raise ProviderError("Cache directory must not be a symlink")
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             descriptor, temporary = tempfile.mkstemp(prefix=".jev-", dir=path.parent)
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(_json_bytes(raw))
                 handle.flush()
             os.replace(temporary, path)
-        except OSError:
+        except (OSError, ProviderError):
             self.telemetry["cache_errors"] += 1
         finally:
             if temporary is not None:
@@ -362,7 +401,13 @@ class JevProvider:
             self.telemetry["requests"] += 1
             try:
                 response = self._transport(request, self.timeout)
-            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
+            except (
+                urllib.error.URLError,
+                http.client.HTTPException,
+                TimeoutError,
+                ConnectionError,
+                OSError,
+            ):
                 if attempt == self.MAX_ATTEMPTS - 1:
                     raise ProviderError(
                         "JEV network request failed after bounded retries"

@@ -94,7 +94,21 @@ def _process_pending(engine: Any, limit: int) -> dict[str, Any]:
     # Least recently attempted first, so persistently failing sources rotate
     # behind new ones instead of consuming every run's limit.
     sources.sort(key=lambda source: source.get("processing_attempted_at", ""))
-    results = [engine.process(source["id"]) for source in sources[:limit]]
+    results = []
+    for source in sources[:limit]:
+        try:
+            result = engine.process(source["id"])
+        except ValueError:
+            # The pending snapshot can change while another source is processed.
+            # Only skip retracted/replaced sources, never hide a validation error.
+            if engine.store.is_current(source["id"]):
+                raise
+            result = {
+                "source_id": source["id"],
+                "status": "cancelled",
+                "reason": "source_changed",
+            }
+        results.append(result)
     return {
         "processed": len(results),
         "remaining": max(0, len(sources) - len(results)),

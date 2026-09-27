@@ -105,3 +105,20 @@ run the worker, then ask about that fact in a fresh session. Check the memory's
 source citation and Claude's hook debug log. Stop capture requires a Claude Code
 version that supplies `last_assistant_message`; older versions simply capture
 prompts. No complete conversation or tool-output capture is claimed.
+
+## Worker validation and evidence budget
+
+The worker rechecks the saved project binding before ingesting each queued event.
+It validates the schema, hashed identifiers, event/role pair, nonempty text and
+message byte limit, in addition to the content hash and source key. An event from
+another project, an assistant message labelled as a user prompt, or an event in
+an unbound root remains queued for inspection and increments `failed`; it is not
+ingested. The binding is local scoping, not authentication against someone able
+to rewrite the memory directory.
+
+Recall measures the actual HTML-escaped packet size before selecting each whole
+quotation and citation. Plain text can use the available budget without reserving
+a fivefold expansion for every character. Escaping-heavy quotes that cannot fit
+are skipped, not cut short; other complete, relevant evidence can still fit.
+Project-binding and queued-event reads reject special files and symlinks and are
+bounded by bytes, so a FIFO cannot stall the worker while it reads an event.
