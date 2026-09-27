@@ -30,6 +30,12 @@ class CandidateSpanTests(unittest.TestCase):
         text = "Dr. Patel moved our check-up, e.g. to March, and Mr. Smith agreed to it."
         self.assertEqual(self.texts(text), [text])
 
+    def test_line_break_after_an_abbreviation_still_ends_a_candidate(self):
+        text = "My preferred title is Dr.\nMy office moved to Leeds in May."
+        self.assertEqual(
+            self.texts(text), ["My preferred title is Dr.", "My office moved to Leeds in May."]
+        )
+
     def test_numbers_and_single_letters_still_end_a_sentence(self):
         text = "My daughter just turned 7. Can you suggest a party theme for vitamin D."
         self.assertEqual(

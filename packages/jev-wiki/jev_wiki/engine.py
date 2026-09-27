@@ -122,7 +122,10 @@ def candidate_spans(text: str, max_chars: int = 600) -> list[dict]:
         cursor = start
         for match in _SENTENCE_END.finditer(text, start, stop):
             end = match.end()
-            if end <= cursor or _ABBREVIATION.search(text, cursor, end):
+            if end <= cursor:
+                continue
+            # A line break always ends a candidate, even after an abbreviation.
+            if not text.startswith("\n", end) and _ABBREVIATION.search(text, cursor, end):
                 continue
             pieces.append([cursor, end])
             cursor = end
