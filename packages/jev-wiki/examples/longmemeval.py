@@ -238,6 +238,9 @@ def run_question(item: dict, model: str) -> dict:
             candidates += result.get("candidates", 0)
         row["ingest_statuses"] = dict(statuses)
         row["candidates"] = candidates
+        if set(statuses) - {"complete", "empty"}:
+            # An incomplete store would turn provider failures into retrieval misses.
+            raise RuntimeError(f"ingestion incomplete: {dict(statuses)}")
         row["ingest_seconds"] = time.perf_counter() - started
         key_of = {s["id"]: s["source_key"] for s in engine.store.sources()}
         stored = engine.store.claims(active_only=False)
@@ -276,6 +279,8 @@ def select(data: list[dict], per_type: int, seed: int, include_abstention: bool)
     for item in data:
         if item["question_id"].endswith("_abs") and not include_abstention:
             continue
+        if not item["answer_session_ids"]:
+            continue  # Session recall is undefined without a labelled session.
         groups[item["question_type"]].append(item)
     rng = random.Random(seed)
     chosen = []
@@ -342,7 +347,12 @@ def main() -> int:
     parser.add_argument("--data", required=True, help="longmemeval_s_cleaned.json")
     parser.add_argument("--per-type", type=int, default=5)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--include-abstention", action="store_true")
+    parser.add_argument(
+        "--include-abstention",
+        action="store_true",
+        help="Also score _abs questions, as retrieval of their labelled related session; "
+        "this does not measure abstention itself.",
+    )
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--model", default="jev-1.13.0")
     parser.add_argument("--output", required=True)
