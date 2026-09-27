@@ -225,7 +225,8 @@ def _shortlist(candidates: list[dict]) -> list[dict]:
     picked: dict[str, dict] = {}
     size = 0
     pools = (
-        (heapq.nsmallest(PLAIN_BM25_GUARD, candidates, key=by_plain), PLAIN_BM25_GUARD),
+        # The whole plain order, so a guard slot skipped for size goes to the next claim.
+        (sorted(candidates, key=by_plain), PLAIN_BM25_GUARD),
         (sorted(candidates, key=by_context), SHORTLIST_SIZE),
     )
     for pool, cap in pools:

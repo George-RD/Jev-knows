@@ -220,6 +220,23 @@ class EngineBm25ShortlistTests(unittest.TestCase):
         self.assertIn(small["id"], picked)
         self.assertEqual(len(picked), 13)
 
+    def test_guard_slot_skipped_for_size_goes_to_the_next_plain_match(self):
+        def candidate(i, size, plain, lifted):
+            return {
+                "id": f"{i:03d}",
+                "text": "x" * size,
+                "lexical_score": plain,
+                "context_score": lifted,
+            }
+
+        too_big = candidate(0, 20_000, 100.0, 1.0)
+        plain = [candidate(i, 50, 100.0 - i, 1.0) for i in range(1, 13)]
+        filler = [candidate(100 + i, 50, 0.1, 50.0) for i in range(20)]
+        picked = {c["id"] for c in _shortlist([too_big, *plain, *filler])}
+        self.assertNotIn(too_big["id"], picked)
+        self.assertTrue({c["id"] for c in plain} <= picked)
+        self.assertEqual(len(picked), 24)
+
     def test_lift_scales_claim_scores_by_their_source(self):
         terms = query_terms("harbor")
         claims = [{"source_id": "a"}, {"source_id": "a"}, {"source_id": "b"}]
