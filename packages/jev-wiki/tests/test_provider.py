@@ -200,25 +200,29 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaises(ProviderError):
             loser.ask("source", {"q": question})
 
-    def test_score_tolerates_rounded_four_level_distribution(self):
-        levels = ["Unrelated", "Tangential", "Useful", "Direct"]
-        question = {"type": "score", "prompt": "Rate", "levels": levels}
-        # Unrounded 0.004/0.004/0.004/0.988 → score 2.976; each probability rounds down.
+    def test_score_accepts_rounding_but_respects_unit_sum(self):
+        def ask(levels, probabilities, score):
+            question = {"type": "score", "prompt": "Rate", "levels": levels}
 
-        def mutate(body, score):
-            body["answers"]["q"].update(
-                score=score,
-                legend={str(i): level for i, level in enumerate(levels)},
-                probabilities={"0": 0.0, "1": 0.0, "2": 0.0, "3": 1.0},
-            )
+            def mutate(body):
+                body["answers"]["q"].update(
+                    score=score,
+                    legend={str(i): level for i, level in enumerate(levels)},
+                    probabilities={str(i): p for i, p in enumerate(probabilities)},
+                )
 
-        close = RecordingTransport([lambda body: mutate(body, 2.97)])
-        self.assertEqual(
-            JevProvider("key", transport=close).ask("s", {"q": question})["q"]["value"], 2.97
-        )
-        far = RecordingTransport([lambda body: mutate(body, 2.5)])
+            provider = JevProvider("key", transport=RecordingTransport([mutate]))
+            return provider.ask("s", {"q": question})["q"]["value"]
+
+        four = ["Unrelated", "Tangential", "Useful", "Direct"]
+        # Unrounded 0.004/0.004/0.0149/0.9771 has expectation 2.965; rounded, 2.96.
+        self.assertEqual(ask(four, [0.0, 0.0, 0.01, 0.99], 2.97), 2.97)
         with self.assertRaises(ProviderError):
-            JevProvider("key", transport=far).ask("s", {"q": question})
+            ask(four, [0.0, 0.0, 0.01, 0.99], 2.5)
+        # All mass displayed at level 0 cannot have an expectation of 0.23.
+        ten = [f"Level {i}" for i in range(10)]
+        with self.assertRaises(ProviderError):
+            ask(ten, [1.0] + [0.0] * 9, 0.23)
 
     def test_noul_probability_not_boolean_and_invalid_score_rejected(self):
         mutations_and_questions = [
