@@ -72,7 +72,12 @@ model output.
 
 `recall` makes a BM25 shortlist over active claims and their source titles,
 optionally asks JEV to judge relevance, and emits a bounded context pack with
-citations. The shortlist is a real recall limitation:
+citations. Each matching claim's BM25 score is multiplied by up to 1.5 according to
+how well its whole source matches, so a claim from a source that keeps returning to
+the query's topic can overtake one that matched nearly as well on the query's filler
+words alone. The twelve best plain-BM25 claims always stay in the 24-claim shortlist,
+so a source full of filler matches cannot crowd out a rare-term match before JEV
+reranks. The shortlist is a real recall limitation:
 reranking cannot recover a passage never offered as a candidate. Unmatched queries
 must not be padded with unrelated material merely to reach `limit`.
 
