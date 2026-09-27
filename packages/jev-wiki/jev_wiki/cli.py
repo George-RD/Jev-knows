@@ -125,7 +125,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "recall" and args.offline:
         use_provider = False
     embedder = None
-    if args.command == "recall":
+    # --offline promises lexical retrieval; loading a model by name can reach the network.
+    if args.command == "recall" and not args.offline:
         from .embedding import from_env
 
         embedder = from_env()

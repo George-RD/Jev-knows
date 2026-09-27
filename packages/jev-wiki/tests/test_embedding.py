@@ -72,6 +72,21 @@ class EmbeddingRecallTests(unittest.TestCase):
         self.assertEqual(result["items"], [])
         self.assertEqual(result["candidate_count"], 0)
 
+    def test_embedder_failure_leaves_recall_lexical(self):
+        class Broken:
+            def similarities(self, query, texts):
+                raise RuntimeError("encoder failed")
+
+        engine = Engine(self.root, embedder=Broken())
+        result = engine.recall("quarterly report", offline=True)
+        self.assertEqual(result["mode"], "lexical")
+        self.assertEqual(
+            [i["text"] for i in result["items"]], ["The quarterly report is due next Friday."]
+        )
+
+    def test_embedding_recall_reports_hybrid_mode(self):
+        self.assertEqual(self.engine.recall("basil", offline=True)["mode"], "hybrid")
+
     def test_similar_claim_ranks_above_a_weak_lexical_match(self):
         items = self.engine.recall("Any basil dinner ideas?", offline=True)["items"]
         self.assertEqual(items[0]["text"], "I grow basil and cherry tomatoes on the balcony.")
@@ -115,6 +130,25 @@ class EmbeddingShortlistTests(unittest.TestCase):
         candidates = _candidates(claims, [1.0, 0.0, 2.0], [1.0, 0.0, 2.0])
         self.assertEqual([c["id"] for c in candidates], ["c000", "c002"])
         self.assertTrue(all("semantic_score" not in c for c in candidates))
+
+
+class CliEmbedderTests(unittest.TestCase):
+    def recall(self, *flags):
+        from jev_wiki import cli
+
+        with tempfile.TemporaryDirectory() as root:
+            args = cli._parser().parse_args(
+                ["--root", root, "--provider", "none", "recall", "basil", *flags]
+            )
+            with mock.patch.object(embedding, "from_env", return_value=None) as built:
+                cli.run(args)
+        return built
+
+    def test_recall_builds_the_configured_embedder(self):
+        self.recall().assert_called_once_with()
+
+    def test_offline_recall_never_loads_a_model(self):
+        self.recall("--offline").assert_not_called()
 
 
 class FromEnvTests(unittest.TestCase):

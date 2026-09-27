@@ -534,11 +534,14 @@ class Engine:
         lifted = _with_source_context(claims, texts, titles, scores)
         similarities = None
         if self.embedder is not None and claims:
-            similarities = self.embedder.similarities(query, [c["text"] for c in claims])
+            try:
+                similarities = self.embedder.similarities(query, [c["text"] for c in claims])
+            except Exception:  # noqa: BLE001 - optional model; lexical candidates still stand.
+                similarities = None
         candidates = _candidates(claims, scores, lifted, similarities)
         shortlist = _shortlist(candidates)
         degraded = self.provider is None or offline
-        mode = "lexical"
+        mode = "lexical" if similarities is None else "hybrid"
         if shortlist and self.provider is not None and not offline:
             questions = {
                 f"rank_{i}": {

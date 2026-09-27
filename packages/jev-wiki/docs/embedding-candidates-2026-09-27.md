@@ -19,10 +19,12 @@ in `general` or `preferences` with most other claims, so a topic filter narrows 
 ## Change
 
 `Engine(root, provider, embedder=...)` takes an optional embedder. The CLI's `recall`
-and the prompt hook build one only when `JEV_WIKI_EMBEDDING_MODEL` is set (`default`
-selects `minishlab/potion-retrieval-32M`) and the `embed` extra (`model2vec`) is
-installed; otherwise recall is unchanged. A model that fails to load leaves recall
-lexical rather than failing.
+builds one only when `JEV_WIKI_EMBEDDING_MODEL` is set (`default` selects
+`minishlab/potion-retrieval-32M`) and the `embed` extra (`model2vec`) is installed;
+otherwise recall is unchanged. `recall --offline` never loads a model, since loading
+one by name can reach Hugging Face. A model that fails to load, or fails while
+encoding, leaves recall lexical rather than failing; a recall that used similarities
+reports mode `hybrid`.
 
 With an embedder, recall computes each active claim's cosine similarity to the query:
 
@@ -93,6 +95,7 @@ with the embedder on is pending on TypeSafe credits.
 `potion-retrieval-32M` is a static embedding model: a 129 MB download on first use,
 cached by Hugging Face, and no torch. Loading takes about 1 s; embedding 555 claims
 takes about 30 ms and 10,000 claims about 2.5 s on 4 CPU cores. Vectors are cached per
-process only, so each prompt hook call pays the load and embeds every active claim.
-That is fine for the small single-user wikis this package targets; a larger store
-would want vectors persisted beside `state.json`.
+process only, so each CLI recall pays the load and embeds every active claim. The
+prompt hook stays lexical: its 0.75 s budget is shorter than the load. Persisting
+vectors beside `state.json` and keeping a loaded model in a long-lived process would
+let the hook use embeddings too.
