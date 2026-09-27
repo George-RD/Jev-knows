@@ -155,6 +155,93 @@ def _trim(text: str, start: int, stop: int) -> list[int]:
     return [start, stop]
 
 
+# A claim in the best-matching source scores up to (1 + weight) times its own BM25.
+SOURCE_CONTEXT_WEIGHT = 0.5
+
+
+def _with_source_context(
+    claims: list[dict],
+    texts: list[tuple[int, Counter]],
+    titles: dict[str, tuple[int, Counter]],
+    scores: list[float],
+) -> list[float]:
+    """Scale each claim's BM25 by how well its whole source matches the query.
+
+    A request like "any ideas for my paintings?" shares its filler words with many
+    unrelated claims, while the claims that answer it sit in a source that keeps
+    returning to paintings. The source is scored as one BM25 document (its active
+    claims plus its title) and each claim's own score is multiplied by
+    ``1 + SOURCE_CONTEXT_WEIGHT * source / best source``. The lift is proportional to
+    the claim's own match, so a weak match cannot overtake a claim that scores more
+    than 1.5 times as well on its own, and unmatched claims stay at zero. A claim that
+    matches only through its source title keeps its plain score.
+    """
+    if not any(scores):
+        return scores
+    per_source: dict[str, tuple[int, Counter]] = {}
+    for claim, (length, tf) in zip(claims, texts):
+        sid = claim["source_id"]
+        if sid not in per_source:
+            title_length, title_tf = titles[sid]  # The title counts once per source.
+            per_source[sid] = (title_length, Counter(title_tf))
+        total, counts = per_source[sid]
+        counts.update(tf)
+        per_source[sid] = (total + length, counts)
+    source_scores = dict(zip(per_source, bm25_from_stats(per_source.values())))
+    # A positive claim score means a query term in the claim or its title, and both
+    # count toward the source, so the best source score is positive too.
+    best_source = max(source_scores.values())
+    return [
+        score * (1 + SOURCE_CONTEXT_WEIGHT * source_scores[claim["source_id"]] / best_source)
+        if tf
+        else score
+        for claim, score, (_, tf) in zip(claims, scores, texts)
+    ]
+
+
+SHORTLIST_SIZE = 24
+SHORTLIST_BYTES = 14_000
+# The best plain-BM25 claims always reach the ranker, whatever their source's score.
+PLAIN_BM25_GUARD = 12
+
+
+def _shortlist(candidates: list[dict]) -> list[dict]:
+    """Up to SHORTLIST_SIZE candidates within SHORTLIST_BYTES, best context score first.
+
+    Source-level BM25 cannot tell filler words from topic words when there are only a
+    few sources, so a source that repeats "any ideas for my" could lift enough weak
+    matches to push the one claim holding a rare query term out of the shortlist.
+    The PLAIN_BM25_GUARD best plain-BM25 claims are therefore taken first, budget
+    included, and lifted claims fill the remaining room.
+    """
+
+    def by_plain(c: dict) -> tuple:
+        return -c["lexical_score"], c["id"]
+
+    def by_context(c: dict) -> tuple:
+        return -c["context_score"], c["id"]
+
+    picked: dict[str, dict] = {}
+    size = 0
+    pools = (
+        (heapq.nsmallest(PLAIN_BM25_GUARD, candidates, key=by_plain), PLAIN_BM25_GUARD),
+        (sorted(candidates, key=by_context), SHORTLIST_SIZE),
+    )
+    for pool, cap in pools:
+        for candidate in pool:
+            if len(picked) >= cap:
+                break
+            if candidate["id"] in picked:
+                continue
+            # Bound state, as well as candidate count, for JEV's shared context.
+            cost = len(candidate["text"].encode("utf-8")) + 100
+            if size + cost > SHORTLIST_BYTES:
+                break
+            picked[candidate["id"]] = candidate
+            size += cost
+    return sorted(picked.values(), key=by_context)
+
+
 CANDIDATES_PER_ASK = 8
 
 
@@ -368,31 +455,26 @@ class Engine:
         ]
         # BM25 over active claims plus their source titles: rare, repeated query terms
         # outrank common ones, and long claims do not win on length alone. Each title
-        # is tokenized once per source and never copied into its claims.
+        # is tokenized once per source and never copied into its claims. Each matching
+        # claim is then lifted by how well its whole source matches (_with_source_context).
         terms = query_terms(query)
         titles = {
             sid: term_stats(source.get("title", ""), terms) for sid, source in sources.items()
         }
+        texts = [term_stats(claim["text"], terms) for claim in claims] if terms else []
 
-        def stats(claim: dict) -> tuple[int, Counter]:
-            length, tf = term_stats(claim["text"], terms)
+        def with_title(claim: dict, text: tuple[int, Counter]) -> tuple[int, Counter]:
             title_length, title_tf = titles[claim["source_id"]]
-            return length + title_length, tf + title_tf
+            return text[0] + title_length, text[1] + title_tf
 
-        scores = bm25_from_stats(map(stats, claims)) if terms else [0.0] * len(claims)
+        scores = bm25_from_stats(map(with_title, claims, texts)) if terms else [0.0] * len(claims)
+        lifted = _with_source_context(claims, texts, titles, scores)
         candidates = [
-            {**claim, "lexical_score": score} for claim, score in zip(claims, scores) if score > 0
+            {**claim, "lexical_score": score, "context_score": context_score}
+            for claim, score, context_score in zip(claims, scores, lifted)
+            if score > 0
         ]
-        candidates.sort(key=lambda c: (-c["lexical_score"], c["id"]))
-        # Bound state, as well as candidate count, for JEV's shared context.
-        shortlist = []
-        size = 0
-        for candidate in candidates[:24]:
-            cost = len(candidate["text"].encode("utf-8")) + 100
-            if size + cost > 14_000:
-                break
-            shortlist.append(candidate)
-            size += cost
+        shortlist = _shortlist(candidates)
         degraded = self.provider is None or offline
         mode = "lexical"
         if shortlist and self.provider is not None and not offline:
@@ -428,7 +510,7 @@ class Engine:
                         raise ProviderError("invalid relevance score")
                     claim["relevance"] = score
                 shortlist = [c for c in shortlist if c["relevance"] >= 1.5]
-                shortlist.sort(key=lambda c: (-c["relevance"], -c["lexical_score"], c["id"]))
+                shortlist.sort(key=lambda c: (-c["relevance"], -c["context_score"], c["id"]))
                 mode = "jev_reranked"
                 degraded = False
             except (ProviderError, KeyError, TypeError):

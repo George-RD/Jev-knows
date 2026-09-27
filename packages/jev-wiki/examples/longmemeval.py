@@ -22,9 +22,10 @@ promoted through the store's review API and four retrieval modes run:
 - ``bm25_claims_jev``: that BM25 shortlist scored by the engine's own rerank question.
 
 The last two are experiments, not package behaviour. Before the engine's shortlist
-moved to BM25 they separated candidate generation from JEV's ranking; now they differ
-from the engine only in leaving source titles out of the match. Policies other than ``shipped`` are a calibration
-sweep, not proposed settings.
+moved to BM25 they separated candidate generation from JEV's ranking. Now they are
+plain claim BM25: the engine also matches source titles and lifts each claim by how
+well its whole source matches the query. Policies other than ``shipped`` are a
+calibration sweep, not proposed settings.
 
 Usage (``TYPESAFE_API_KEY`` must be set; download ``longmemeval_s_cleaned.json`` from
 https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned first):
@@ -122,7 +123,7 @@ def admits(claim: dict, threshold: float | None) -> bool:
 
 
 def shortlist_by_bm25(query: str, claims: list[dict]) -> list[dict]:
-    """The engine's shortlist bounds (24 claims, 14 KB), filled in BM25 order."""
+    """The engine's shortlist bounds (24 claims, 14 KB), filled in plain BM25 order."""
     picked, size = [], 0
     for i in bm25_rank(query, [c["text"] for c in claims])[:SHORTLIST]:
         cost = len(claims[i]["text"].encode("utf-8")) + 100
