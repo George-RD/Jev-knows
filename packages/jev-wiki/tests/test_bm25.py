@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from jev_wiki.bm25 import bm25_from_stats, bm25_scores, query_terms, term_stats, words
-from jev_wiki.engine import SOURCE_CONTEXT_WEIGHT, Engine, _with_source_context
+from jev_wiki.engine import SOURCE_CONTEXT_WEIGHT, Engine, _shortlist, _with_source_context
 from test_lifecycle import LifecycleDecisionFixture
 
 
@@ -206,6 +206,19 @@ class EngineBm25ShortlistTests(unittest.TestCase):
         self.assertEqual(
             result["items"][0]["text"], "My paintings sell best at the Sunday craft market."
         )
+
+    def test_oversized_candidate_is_skipped_not_the_end_of_the_fill(self):
+        def candidate(i, size, plain, lifted):
+            text = "x" * size
+            return {"id": f"{i:03d}", "text": text, "lexical_score": plain, "context_score": lifted}
+
+        guarded = [candidate(i, 1_000, 10.0 - i / 100, 1.0) for i in range(12)]
+        big = candidate(100, 900, 1.0, 5.0)  # Best context score; 13,200 + 1,000 > 14,000.
+        small = candidate(101, 50, 0.5, 4.0)
+        picked = {c["id"] for c in _shortlist([*guarded, big, small])}
+        self.assertNotIn(big["id"], picked)
+        self.assertIn(small["id"], picked)
+        self.assertEqual(len(picked), 13)
 
     def test_lift_scales_claim_scores_by_their_source(self):
         terms = query_terms("harbor")

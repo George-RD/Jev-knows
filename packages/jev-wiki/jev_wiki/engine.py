@@ -212,7 +212,8 @@ def _shortlist(candidates: list[dict]) -> list[dict]:
     few sources, so a source that repeats "any ideas for my" could lift enough weak
     matches to push the one claim holding a rare query term out of the shortlist.
     The PLAIN_BM25_GUARD best plain-BM25 claims are therefore taken first, budget
-    included, and lifted claims fill the remaining room.
+    included, and lifted claims fill the remaining room. A claim too large for the
+    remaining budget is skipped rather than ending the fill.
     """
 
     def by_plain(c: dict) -> tuple:
@@ -236,7 +237,7 @@ def _shortlist(candidates: list[dict]) -> list[dict]:
             # Bound state, as well as candidate count, for JEV's shared context.
             cost = len(candidate["text"].encode("utf-8")) + 100
             if size + cost > SHORTLIST_BYTES:
-                break
+                continue  # A smaller, lower-ranked claim may still fit.
             picked[candidate["id"]] = candidate
             size += cost
     return sorted(picked.values(), key=by_context)
