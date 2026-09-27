@@ -82,3 +82,5 @@ expose regressions and candidate-generation limits; it cannot establish superior
 over Cognee, mem0, a vector index, or a generative memory pipeline. It does not test
 answer generation, real user histories, harness injection, sustained concurrency,
 or long-term forgetting. Those need separately labelled, representative datasets.
+
+First live results: [live-evaluation-2026-09-27.md](live-evaluation-2026-09-27.md).

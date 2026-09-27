@@ -175,6 +175,18 @@ class ProviderTests(unittest.TestCase):
                 self.assertEqual(len(transport.requests), 1)
                 self.assertEqual(provider.telemetry["failures"], 1)
 
+    def test_two_decimal_rounding_drift_is_accepted(self):
+        # Observed live: seven options rounded to hundredths summing to 0.99.
+        labels = {f"l{i}": f"Label {i}" for i in range(7)}
+        question = {"type": "choice", "prompt": "Pick one.", "choices": labels}
+        rounded = dict(zip(labels, (0.81, 0.16, 0.01, 0.01, 0.0, 0.0, 0.0)))
+
+        def mutate(body):
+            body["answers"]["q"].update(choice="l0", probabilities=rounded)
+
+        provider = JevProvider("key", transport=RecordingTransport([mutate]))
+        self.assertEqual(provider.ask("source", {"q": question})["q"]["value"], "l0")
+
     def test_noul_probability_not_boolean_and_invalid_score_rejected(self):
         mutations_and_questions = [
             (
