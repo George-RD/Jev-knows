@@ -341,8 +341,8 @@ class WikiStore:
         if (
             isinstance(confidence, bool)
             or not isinstance(confidence, (int, float))
-            or not math.isfinite(confidence)
             or not 0 <= confidence <= 1
+            or not math.isfinite(confidence)
         ):
             raise ValueError("Claim confidence must be a finite number between zero and one")
         value.setdefault("relations", [])

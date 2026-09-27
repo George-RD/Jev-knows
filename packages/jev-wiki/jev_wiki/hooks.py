@@ -11,6 +11,7 @@ import html
 import json
 import os
 import signal
+import stat
 import tempfile
 import threading
 import time
@@ -129,7 +130,7 @@ def _scope(root: Path, project_root: Path, payload: dict[str, Any]) -> tuple[str
     expected = {"schema_version": SCHEMA_VERSION, "project_id": project_id}
     if not binding.exists():
         _publish_once(binding, _canonical(expected))
-    if binding.stat().st_size > 1_024 or json.loads(binding.read_bytes()) != expected:
+    if _read_json_file(binding, 1_024) != expected:
         raise ValueError("This memory root is bound to a different project")
     return project_id, _digest(session)
 
@@ -209,12 +210,18 @@ def handle_hook(
         from .engine import Engine
 
         bounded_chars = max(0, min(int(max_chars), MAX_CONTEXT_CHARS))
-        # HTML escaping expands each character by at most five characters.
-        context_budget = (bounded_chars - len(EVIDENCE_PREFIX) - len(EVIDENCE_SUFFIX)) // 5
+        # Pack against actual escaped size, not a worst-case fivefold expansion.
+        context_budget = bounded_chars - len(EVIDENCE_PREFIX) - len(EVIDENCE_SUFFIX)
         if context_budget < 256:
             return {}
         query = text if len(text) <= 2_000 else text[:1_000] + text[-1_000:]
-        result = Engine(root).recall(query, limit=5, max_chars=context_budget, offline=True)
+        result = Engine(root).recall(
+            query,
+            limit=5,
+            max_chars=context_budget,
+            offline=True,
+            context_cost=lambda value: len(html.escape(value, quote=False)),
+        )
         context = result.get("context")
         if not result.get("items") or not isinstance(context, str) or not context.strip():
             return {}
@@ -244,23 +251,51 @@ def read_payload(stream: BinaryIO) -> dict[str, Any] | None:
         return None
 
 
-def _load_event(path: Path) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_PAYLOAD_BYTES:
-        raise ValueError("Hook event exceeds the payload limit")
-    record = json.loads(path.read_bytes())
+def _read_json_file(path: Path, max_bytes: int) -> Any:
+    """Bound local reads and reject symlinks and special files without blocking."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+            raise ValueError("Hook data must be a bounded regular file")
+        data = handle.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise ValueError("Hook data exceeds the payload limit")
+    return json.loads(data)
+
+
+def _load_event(path: Path, root: Path) -> dict[str, Any]:
+    record = _read_json_file(path, MAX_PAYLOAD_BYTES)
+    binding = _read_json_file(_path(root, "hook-project.json"), 1_024)
+    if not isinstance(record, dict) or not isinstance(binding, dict):
+        raise ValueError("Invalid hook event or project binding")
     fields = ("schema_version", "project_id", "session_id", "event", "text", "role")
     event_data = {key: record[key] for key in fields}
     event_id = _digest(_canonical(event_data))
     key = f"claude:{record['project_id']}:{record['session_id']}:{event_id}"
+    valid_ids = all(
+        isinstance(record[name], str)
+        and len(record[name]) == 64
+        and all(char in "0123456789abcdef" for char in record[name])
+        for name in ("project_id", "session_id")
+    )
     if (
-        record["schema_version"] != SCHEMA_VERSION
+        type(record["schema_version"]) is not int
+        or record["schema_version"] != SCHEMA_VERSION
+        or type(binding.get("schema_version")) is not int
+        or binding.get("schema_version") != SCHEMA_VERSION
+        or record["project_id"] != binding.get("project_id")
+        or not valid_ids
         or record.get("event_id") != event_id
         or path.stem != event_id
         or record.get("source_key") != key
-        or record.get("role") not in {"user", "assistant"}
-        or not isinstance(record.get("text"), str)
+        or (record["event"], record["role"])
+        not in (("UserPromptSubmit", "user"), ("Stop", "assistant"))
+        or not isinstance(record["text"], str)
+        or not record["text"].strip()
+        or len(record["text"].encode("utf-8")) > MAX_MESSAGE_BYTES
     ):
-        raise ValueError("Invalid hook event")
+        raise ValueError("Invalid or out-of-project hook event")
     return record
 
 
@@ -280,7 +315,7 @@ def drain_inbox(root: str | Path, engine: Any, *, limit: int = 100) -> dict[str,
         if index >= max(0, limit):
             break
         try:
-            record = _load_event(path)
+            record = _load_event(path, root)
             receipt = _path(root, "inbox", "hook-receipts", path.name)
             if not receipt.exists():
                 engine.ingest(
