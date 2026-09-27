@@ -207,6 +207,7 @@ def handle_hook(
             pass
         if event != "UserPromptSubmit":
             return {}
+        from .embedding import from_env
         from .engine import Engine
 
         bounded_chars = max(0, min(int(max_chars), MAX_CONTEXT_CHARS))
@@ -215,7 +216,7 @@ def handle_hook(
         if context_budget < 256:
             return {}
         query = text if len(text) <= 2_000 else text[:1_000] + text[-1_000:]
-        result = Engine(root).recall(
+        result = Engine(root, embedder=from_env()).recall(
             query,
             limit=5,
             max_chars=context_budget,

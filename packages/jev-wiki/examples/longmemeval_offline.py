@@ -4,6 +4,8 @@ Every sentence candidate is kept and activated (an upper bound like the live har
 ``all_stored`` policy), then ``Engine.recall(offline=True)`` is scored with session
 recall. This isolates candidate generation: run it from two checkouts to compare
 shortlist rankings. Keep answers come from a stub, so this says nothing about intake.
+Set ``JEV_WIKI_EMBEDDING_MODEL=default`` (with the ``embed`` extra installed) to score
+recall with local embedding candidates.
 
     python packages/jev-wiki/examples/longmemeval_offline.py \
         --data longmemeval_s_cleaned.json --per-type 5
@@ -23,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from jev_wiki.embedding import from_env  # noqa: E402
 from jev_wiki.engine import Engine  # noqa: E402
 from longmemeval import KS, score_sessions, select, session_text  # noqa: E402
 
@@ -39,10 +42,20 @@ class KeepEverything:
         }
 
 
+_EMBEDDER: list = []
+
+
+def _embedder():
+    """One embedder per worker process, from JEV_WIKI_EMBEDDING_MODEL (None when unset)."""
+    if not _EMBEDDER:
+        _EMBEDDER.append(from_env())
+    return _EMBEDDER[0]
+
+
 def run_question(item: dict) -> tuple[str, dict]:
     expected_ids = set(item["answer_session_ids"])
     with tempfile.TemporaryDirectory(prefix="jev-lme-offline-") as root:
-        engine = Engine(root, KeepEverything())
+        engine = Engine(root, KeepEverything(), embedder=_embedder())
         expected = set()
         for index, (sid, session) in enumerate(
             zip(item["haystack_session_ids"], item["haystack_sessions"])

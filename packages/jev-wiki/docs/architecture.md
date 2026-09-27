@@ -77,7 +77,12 @@ how well its whole source matches, so a claim from a source that keeps returning
 the query's topic can overtake one that matched nearly as well on the query's filler
 words alone. The twelve best plain-BM25 claims always stay in the 24-claim shortlist,
 so a source full of filler matches cannot crowd out a rare-term match before JEV
-reranks. The shortlist is a real recall limitation:
+reranks. With an optional local embedder (the `embed` extra and
+`JEV_WIKI_EMBEDDING_MODEL`), the twelve best lexical claims share the shortlist with
+the claims most similar to the query, ordered by reciprocal-rank fusion, so evidence
+with no shared words can reach the ranker; claims below 0.2 similarity are never
+added. See [embedding-candidates-2026-09-27.md](embedding-candidates-2026-09-27.md).
+The shortlist is a real recall limitation:
 reranking cannot recover a passage never offered as a candidate. Unmatched queries
 must not be padded with unrelated material merely to reach `limit`.
 
@@ -173,7 +178,8 @@ in a stop/retry loop.
 
 - Free-form multi-document prose synthesis or an autonomous research agent.
 - Guaranteed contradiction discovery, truth verification or adversarial immunity.
-- Graph/vector database infrastructure, embeddings or a distributed service.
+- Graph/vector database infrastructure or a distributed service. Embeddings are an
+  optional, local recall candidate source only.
 - Automatic replacement of Cognee's existing public APIs.
 - Multi-user permissions, tenant isolation, encrypted storage or compliance claims.
 - Installation into every agent harness, or claims of live harness testing without

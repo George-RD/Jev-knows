@@ -35,7 +35,7 @@ class FakeEngine:
     }
     failure = False
 
-    def __init__(self, root, provider=None):
+    def __init__(self, root, provider=None, embedder=None):
         if provider is not None:
             raise AssertionError("Hook constructed a provider")
 

@@ -203,10 +203,52 @@ SHORTLIST_SIZE = 24
 SHORTLIST_BYTES = 14_000
 # The best plain-BM25 claims always reach the ranker, whatever their source's score.
 PLAIN_BM25_GUARD = 12
+# With an embedder, the best lexical claims take this many slots and the claims most
+# similar to the query fill the rest, so neither source can crowd out the other.
+LEXICAL_SLOTS = 12
+# Reciprocal-rank fusion orders a mixed shortlist: 1/(k + rank) per source, with the
+# embedding rank counted twice (docs/embedding-candidates-2026-09-27.md).
+FUSION_K = 10
+SEMANTIC_WEIGHT = 2.0
+# Claims less similar than this are never semantic candidates, so a query with no
+# related memory is not padded with the nearest unrelated claims.
+MIN_SIMILARITY = 0.2
+
+
+def _order(c: dict) -> tuple:
+    return -c.get("fused_score", c["context_score"]), c["id"]
+
+
+def _candidates(claims: list[dict], scores, lifted, similarities=None) -> list[dict]:
+    """Recall candidates: every lexical match, plus the most query-similar claims.
+
+    ``similarities`` (one per claim, or None without an embedder) adds up to
+    SHORTLIST_SIZE claims at or above MIN_SIMILARITY, matched or not, and gives each
+    candidate a ``fused_score`` from its lexical (context order) and semantic ranks.
+    """
+    candidates = [
+        {**claim, "lexical_score": score, "context_score": context_score}
+        for claim, score, context_score in zip(claims, scores, lifted)
+    ]
+    if similarities is None:
+        return [c for c in candidates if c["lexical_score"] > 0]
+    for candidate, similarity in zip(candidates, similarities):
+        candidate["semantic_score"] = similarity
+    lexical = sorted((c for c in candidates if c["lexical_score"] > 0), key=_order)
+    semantic = sorted(
+        (c for c in candidates if c["semantic_score"] >= MIN_SIMILARITY),
+        key=lambda c: (-c["semantic_score"], c["id"]),
+    )
+    fused: dict[str, float] = {}
+    for weight, ranked in ((1.0, lexical), (SEMANTIC_WEIGHT, semantic)):
+        for rank, c in enumerate(ranked):
+            fused[c["id"]] = fused.get(c["id"], 0.0) + weight / (FUSION_K + rank + 1)
+    kept = {c["id"]: c for c in (*lexical, *semantic[:SHORTLIST_SIZE])}
+    return [{**c, "fused_score": fused[i]} for i, c in kept.items()]
 
 
 def _shortlist(candidates: list[dict]) -> list[dict]:
-    """Up to SHORTLIST_SIZE candidates within SHORTLIST_BYTES, best context score first.
+    """Up to SHORTLIST_SIZE candidates within SHORTLIST_BYTES, best fused or context score first.
 
     Source-level BM25 cannot tell filler words from topic words when there are only a
     few sources, so a source that repeats "any ideas for my" could lift enough weak
@@ -214,6 +256,10 @@ def _shortlist(candidates: list[dict]) -> list[dict]:
     The PLAIN_BM25_GUARD best plain-BM25 claims are therefore taken first, budget
     included, and lifted claims fill the remaining room. A claim too large for the
     remaining budget is skipped rather than ending the fill.
+
+    Candidates with a ``semantic_score`` (an embedder is configured) are taken as the
+    LEXICAL_SLOTS best lexical matches by context score, then the most similar claims,
+    then further lexical matches if room remains.
     """
 
     def by_plain(c: dict) -> tuple:
@@ -222,13 +268,26 @@ def _shortlist(candidates: list[dict]) -> list[dict]:
     def by_context(c: dict) -> tuple:
         return -c["context_score"], c["id"]
 
+    def by_similarity(c: dict) -> tuple:
+        return -c["semantic_score"], c["id"]
+
+    matched = [c for c in candidates if c["lexical_score"] > 0]
+    if any("semantic_score" in c for c in candidates):
+        similar = [c for c in candidates if c["semantic_score"] >= MIN_SIMILARITY]
+        pools = (
+            (sorted(matched, key=by_context), LEXICAL_SLOTS),
+            (sorted(similar, key=by_similarity), SHORTLIST_SIZE),
+            # Too few similar claims: lexical matches take the remaining room.
+            (sorted(matched, key=by_context), SHORTLIST_SIZE),
+        )
+    else:
+        pools = (
+            # The whole plain order, so a guard slot skipped for size goes to the next claim.
+            (sorted(matched, key=by_plain), PLAIN_BM25_GUARD),
+            (sorted(matched, key=by_context), SHORTLIST_SIZE),
+        )
     picked: dict[str, dict] = {}
     size = 0
-    pools = (
-        # The whole plain order, so a guard slot skipped for size goes to the next claim.
-        (sorted(candidates, key=by_plain), PLAIN_BM25_GUARD),
-        (sorted(candidates, key=by_context), SHORTLIST_SIZE),
-    )
     for pool, cap in pools:
         for candidate in pool:
             if len(picked) >= cap:
@@ -241,7 +300,7 @@ def _shortlist(candidates: list[dict]) -> list[dict]:
                 continue  # A smaller, lower-ranked claim may still fit.
             picked[candidate["id"]] = candidate
             size += cost
-    return sorted(picked.values(), key=by_context)
+    return sorted(picked.values(), key=_order)
 
 
 CANDIDATES_PER_ASK = 8
@@ -281,10 +340,12 @@ def _processing_batches(spans: list[dict], role: str) -> Iterator[tuple[int, lis
 class Engine:
     """Single-user, explicitly scoped memory; provider=None never uses the network."""
 
-    def __init__(self, root: str | Path, provider: Any = None):
+    def __init__(self, root: str | Path, provider: Any = None, embedder: Any = None):
         self.root = Path(root)
         self.store = WikiStore(root)
         self.provider = provider
+        # Optional local model (jev_wiki.embedding); None keeps recall purely lexical.
+        self.embedder = embedder
 
     def _ask(self, state: str, questions: dict) -> dict:
         try:
@@ -471,11 +532,10 @@ class Engine:
 
         scores = bm25_from_stats(map(with_title, claims, texts)) if terms else [0.0] * len(claims)
         lifted = _with_source_context(claims, texts, titles, scores)
-        candidates = [
-            {**claim, "lexical_score": score, "context_score": context_score}
-            for claim, score, context_score in zip(claims, scores, lifted)
-            if score > 0
-        ]
+        similarities = None
+        if self.embedder is not None and claims:
+            similarities = self.embedder.similarities(query, [c["text"] for c in claims])
+        candidates = _candidates(claims, scores, lifted, similarities)
         shortlist = _shortlist(candidates)
         degraded = self.provider is None or offline
         mode = "lexical"
@@ -512,7 +572,7 @@ class Engine:
                         raise ProviderError("invalid relevance score")
                     claim["relevance"] = score
                 shortlist = [c for c in shortlist if c["relevance"] >= 1.5]
-                shortlist.sort(key=lambda c: (-c["relevance"], -c["context_score"], c["id"]))
+                shortlist.sort(key=lambda c: (-c["relevance"], *_order(c)))
                 mode = "jev_reranked"
                 degraded = False
             except (ProviderError, KeyError, TypeError):

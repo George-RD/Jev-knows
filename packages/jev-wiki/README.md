@@ -33,6 +33,18 @@ invent model results. Add a key and run `process` to retry pending sources. Use
 retrieval over already accepted memories. CLI provider selection defaults to `auto`:
 if a key is present, processing and ordinary recall send bounded evidence to TypeSafe.
 
+Recall can also use a small local embedding model, so a question about "dinner with my
+homegrown ingredients" can find a note that only mentions basil. It is off by default:
+
+```bash
+pip install "jev-wiki[embed]"
+export JEV_WIKI_EMBEDDING_MODEL=default   # or a model2vec model name or local path
+```
+
+The first use downloads `minishlab/potion-retrieval-32M` (129 MB) from Hugging Face;
+a local path needs no network. CLI recall and the prompt hook then add the claims most
+similar to the query to the shortlist. Queries and claims stay on your machine.
+
 Re-ingest a changed document with the **same source key** to replace its current
 revision. Independent sources need independent keys: capture order does not resolve
 their factual disagreements.
@@ -128,11 +140,12 @@ measured during this implementation because a key was unavailable.
 ## Current limits
 
 This initial implementation targets small, single-user wikis. BM25 shortlisting
-can miss synonyms before JEV sees a candidate. Maintenance checks a bounded selection
+can miss synonyms before JEV sees a candidate; the optional embedding extra (below)
+narrows that gap. Maintenance checks a bounded selection
 of pairs, not every possible contradiction. Claims are source sentences: a sentence
 holding several assertions stays quoted whole, and sentence splitting is a heuristic
 (abbreviations it does not know can split a sentence early). There is no generative summarizer, automatic
-entity graph, embeddings, distributed service, or Cognee benchmark parity claim.
+entity graph, vector database, distributed service, or Cognee benchmark parity claim.
 
 Sources are limited to 200 KB per ingest, query length to 2,000 characters, and
 canonical state to 16 MiB. A full state file is read for operations; this is not an
