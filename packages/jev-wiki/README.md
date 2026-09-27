@@ -43,7 +43,9 @@ export JEV_WIKI_EMBEDDING_MODEL=default   # or a model2vec model name or local p
 
 The first use downloads `minishlab/potion-retrieval-32M` (129 MB) from Hugging Face;
 a local path needs no network. `recall` then adds the claims most similar to the query
-to its shortlist; queries and claims stay on your machine. `recall --offline` and the
+to its shortlist. The embedding itself runs on your machine; with `TYPESAFE_API_KEY`
+set, ordinary `recall` still sends the query and shortlisted claims to TypeSafe for
+reranking. `recall --offline` and the
 prompt hook stay lexical: loading the model takes about a second, over the hook's
 0.75 s budget.
 
