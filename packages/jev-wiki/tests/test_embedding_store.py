@@ -124,16 +124,21 @@ class StaticEmbedderTests(unittest.TestCase):
         )
 
     def records(self) -> int:
-        (vector_file,) = self.cache.glob("*.vec")
+        vector_file = self.cache / f"{self.embedder().fingerprint.hex()[:16]}.vec"
         record = 32 + 4 * 4
         size = vector_file.stat().st_size - embedding._HEADER.size
         self.assertEqual(size % record, 0)
         return size // record
 
-    def test_new_claims_are_appended_and_other_models_dropped(self):
+    def test_new_claims_are_appended_and_other_models_dropped_by_the_worker(self):
         self.cache.mkdir(parents=True)
         other = self.cache / "0123456789abcdef.vec"
         other.write_bytes(b"another model")
+        self.embedder(deadline=time.monotonic() + 60).vectors(["basil"])
+        self.assertTrue(other.exists())  # The hook never removes another model's vectors.
+        self.embedder(deadline=time.monotonic() + 60).vectors(["basil", "report"])
+        self.assertEqual(self.records(), 2)
+        (self.cache / f"{self.embedder().fingerprint.hex()[:16]}.vec").unlink()
         self.embedder().vectors(["basil", "report"])
         self.assertFalse(other.exists())
         self.embedder().vectors(["basil", "report", "garden"])
@@ -149,15 +154,18 @@ class StaticEmbedderTests(unittest.TestCase):
         self.assertEqual(encoded, 0)
         self.assertEqual(self.records(), 1)
 
-    def test_torn_append_is_repaired_and_earlier_records_kept(self):
+    def test_torn_append_keeps_earlier_records_and_only_the_worker_rewrites(self):
         self.embedder().vectors(["basil", "report"])
         (vector_file,) = self.cache.glob("*.vec")
         with vector_file.open("ab") as stream:
-            stream.write(b"half a record")
-        embedder = self.embedder(deadline=time.monotonic() + 60)
-        vectors, encoded = embedder.vectors(["basil", "report", "garden"])
+            stream.write(b"half a record")  # Or another process's append in progress.
+        torn = vector_file.read_bytes()
+        hook = self.embedder(deadline=time.monotonic() + 60)
+        vectors, encoded = hook.vectors(["basil", "report", "garden"])
         self.assertEqual(encoded, 1)
         np.testing.assert_allclose(vectors[0], expected(self.model, "basil"), atol=1e-6)
+        self.assertEqual(vector_file.read_bytes(), torn)
+        self.assertEqual(self.embedder().vectors(["basil", "report", "garden"])[1], 1)
         self.assertEqual(self.records(), 3)
 
     def test_foreign_vector_file_is_replaced(self):
@@ -210,14 +218,19 @@ class StaticEmbedderTests(unittest.TestCase):
         with self.assertRaises(embedding.EmbeddingTimeout):
             embedder.similarities("basil", ["basil"])
 
-    def test_vectors_encoded_late_are_used_but_not_persisted(self):
+    def test_vectors_encoded_late_are_saved_but_recall_stays_lexical(self):
+        self.embedder().vectors(["report"])
         embedder = self.embedder()
+        check = embedder._check_deadline
         embedder._check_deadline = lambda: None  # Encoding finishes, then the deadline passes.
         embedder.deadline = time.monotonic() - 1
-        vectors, encoded = embedder.vectors(["basil"])
+        vectors, encoded = embedder.vectors(["report", "basil"])
         self.assertEqual(encoded, 1)
-        np.testing.assert_allclose(vectors[0], expected(self.model, "basil"), atol=1e-6)
-        self.assertFalse(self.cache.exists())
+        np.testing.assert_allclose(vectors[1], expected(self.model, "basil"), atol=1e-6)
+        self.assertEqual(self.records(), 2)
+        embedder._check_deadline = check
+        with self.assertRaises(embedding.EmbeddingTimeout):
+            embedder.similarities("dinner", ["report", "basil"])
 
     def test_hub_ids_resolve_from_the_cache_without_downloading(self):
         hub = self.tmp / "hub"

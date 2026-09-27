@@ -168,7 +168,7 @@ class StaticEmbedder:
         self._record = np.dtype([("key", "u1", (32,)), ("vector", "<f4", (self.dim,))])
         self._memory: dict[bytes, Any] = {}
         self._disk: tuple[dict[bytes, int], Any] | None = None
-        self._disk_ok = False
+        self._disk_state = "missing"
         self._cache_file = None
         if cache_dir is not None:
             self._cache_file = Path(cache_dir) / f"{self.fingerprint.hex()[:16]}.vec"
@@ -230,17 +230,22 @@ class StaticEmbedder:
     def _load_disk(self) -> tuple[dict[bytes, int], Any]:
         """Persisted vectors for this model, last record per key winning, or none.
 
-        ``self._disk_ok`` records whether the file can be appended to: false when it
-        is missing, belongs to another format, or ends in a torn append.
+        ``self._disk_state`` is ``ok`` when the file can be appended to, ``missing``,
+        ``torn`` when it ends in a partial record (a failed or in-progress append), or
+        ``unusable`` (another format, or not a regular file).
         """
         if self._disk is not None:
             return self._disk
         np = self._np
-        self._disk, self._disk_ok = ({}, np.zeros(0, dtype=self._record)), False
+        self._disk = ({}, np.zeros(0, dtype=self._record))
+        self._disk_state = "unusable"
         if self._cache_file is None or self._cache_file.parent.is_symlink():
             return self._disk
         try:
             fd = os.open(self._cache_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            self._disk_state = "missing"
+            return self._disk
         except OSError:
             return self._disk
         with os.fdopen(fd, "rb") as stream:
@@ -251,7 +256,7 @@ class StaticEmbedder:
             if magic != _MAGIC or fingerprint != self.fingerprint or dim != self.dim:
                 return self._disk
             count, torn = divmod(info.st_size - _HEADER.size, self._record.itemsize)
-            self._disk_ok = not torn
+            self._disk_state = "torn" if torn else "ok"
             if not count:
                 return self._disk
             # Mapped: a recall reads the keys, and vectors only as it indexes them.
@@ -271,8 +276,8 @@ class StaticEmbedder:
             records["vector"] = self._np.stack(list(known.values()))
         return records.tobytes()
 
-    def _write_all(self, known: dict[bytes, Any]) -> None:
-        """Replace this model's vector file with ``known``; drop other models' files."""
+    def _write_all(self, known: dict[bytes, Any], *, prune: bool) -> None:
+        """Replace this model's vector file with ``known``; ``prune`` drops other models'."""
         directory = self._cache_file.parent
         fd, temporary = tempfile.mkstemp(prefix=".vectors-", dir=directory)
         try:
@@ -283,24 +288,30 @@ class StaticEmbedder:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-        for other in directory.glob("*.vec"):
+        for other in directory.glob("*.vec") if prune else ():
             if other.name != self._cache_file.name and not other.is_symlink():
                 other.unlink(missing_ok=True)
 
     def _append(self, new: dict[bytes, Any]) -> None:
-        """Append whole records in one write, so concurrent appends do not interleave."""
+        """Append whole records, so a reader only ever sees a torn final record."""
+        data = memoryview(self._records(new))
         fd = os.open(self._cache_file, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
-        with os.fdopen(fd, "wb", buffering=0) as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise ValueError("The vector file must be a regular file")
-            stream.write(self._records(new))
+            while data:
+                data = data[os.write(fd, data) :]
+        finally:
+            os.close(fd)
 
     def _save(self, known: dict[bytes, Any], new: dict[bytes, Any]) -> None:
-        """Persist new vectors, rewriting the file when it is unusable or mostly stale.
+        """Persist new vectors: append, or rewrite a missing, damaged or stale file.
 
         Best effort: vectors are only a cache, so a failed write leaves recall as is.
-        A rewrite costs the whole file, so under a deadline (the hook) only a missing
-        or unusable file is rewritten; stale records are compacted by the worker/CLI.
+        A rewrite costs the whole file and can drop another process's append in
+        progress, so under a deadline (the hook) only a missing file is created and a
+        torn or unusable one is left for the worker or CLI to rewrite. Only they
+        compact stale records and remove other models' files.
         """
         directory = self._cache_file.parent
         try:
@@ -308,9 +319,14 @@ class StaticEmbedder:
                 raise ValueError("The vector directory must not be a symlink")
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             _, stored = self._load_disk()
-            stale = len(stored) + len(new) - len(known)
-            if not self._disk_ok or (self.deadline is None and stale > len(known) + COMPACT_SLACK):
-                self._write_all(known)
+            state = self._disk_state
+            if self.deadline is not None:
+                if state == "missing":
+                    self._write_all(known, prune=False)
+                elif state == "ok" and new:
+                    self._append(new)
+            elif state != "ok" or len(stored) + len(new) - len(known) > len(known) + COMPACT_SLACK:
+                self._write_all(known, prune=True)
             elif new:
                 self._append(new)
         except (OSError, ValueError):
@@ -353,15 +369,14 @@ class StaticEmbedder:
                 matrix[rows] = vector
         live = len(set(digests))
         due = self.deadline is None and len(stored) - live > live + COMPACT_SLACK
-        if self._cache_file is not None and (new or due) and not self._late():
+        # Saving after the deadline is still cheap (the hook only appends), and keeps a
+        # hook that finishes late from re-encoding the same claims on every prompt.
+        if self._cache_file is not None and (new or due):
             known = {d: matrix[row] for row, d in enumerate(digests) if d not in missing}
             self._save({**known, **new}, new)
         if backlog:
             raise EmbeddingTimeout(f"{len(missing) - len(todo)} claims still need vectors")
         return matrix, len(todo)
-
-    def _late(self) -> bool:
-        return self.deadline is not None and time.monotonic() > self.deadline
 
     def similarities(self, query: str, texts: list[str]) -> list[float]:
         """Cosine similarity of the query to each text, in input order."""
@@ -369,6 +384,8 @@ class StaticEmbedder:
             return []
         query_vector = self.encode([query])[0]
         matrix, _ = self.vectors(texts)
+        # Reading many stored vectors is not free either; past the deadline, stay lexical.
+        self._check_deadline()
         return (matrix @ query_vector).tolist()
 
 
