@@ -127,7 +127,7 @@ measured during this implementation because a key was unavailable.
 
 ## Current limits
 
-This initial implementation targets small, single-user wikis. Lexical shortlisting
+This initial implementation targets small, single-user wikis. BM25 shortlisting
 can miss synonyms before JEV sees a candidate. Maintenance checks a bounded selection
 of pairs, not every possible contradiction. Claims are source sentences: a sentence
 holding several assertions stays quoted whole, and sentence splitting is a heuristic

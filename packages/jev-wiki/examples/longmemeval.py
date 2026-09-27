@@ -15,13 +15,15 @@ The BM25 session reference (``bm25_sessions``) ranks raw user-turn text per sess
 with no retention step. Then, for each acceptance policy (see ``POLICIES``), claims are
 promoted through the store's review API and four retrieval modes run:
 
-- ``wiki_lexical``: ``Engine.recall(offline=True)``.
-- ``wiki_jev``: ``Engine.recall()``; the engine's lexical shortlist, reranked by JEV.
-- ``bm25_claims``: BM25 over the same active claims, cut to the engine's shortlist bounds.
+- ``wiki_lexical``: ``Engine.recall(offline=True)``; the engine's BM25 shortlist.
+- ``wiki_jev``: ``Engine.recall()``; that shortlist, reranked by JEV.
+- ``bm25_claims``: BM25 over the same active claims' text alone, cut to the engine's
+  shortlist bounds.
 - ``bm25_claims_jev``: that BM25 shortlist scored by the engine's own rerank question.
 
-The last two are experiments, not package behaviour: they separate candidate
-generation from JEV's ranking. Policies other than ``shipped`` are a calibration
+The last two are experiments, not package behaviour. Before the engine's shortlist
+moved to BM25 they separated candidate generation from JEV's ranking; now they differ
+from the engine only in leaving source titles out of the match. Policies other than ``shipped`` are a calibration
 sweep, not proposed settings.
 
 Usage (``TYPESAFE_API_KEY`` must be set; download ``longmemeval_s_cleaned.json`` from
@@ -35,9 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import random
-import re
 import statistics
 import sys
 import tempfile
@@ -51,34 +51,18 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE_ROOT))
 
 from jev_wiki import __version__  # noqa: E402
+from jev_wiki.bm25 import bm25_scores  # noqa: E402
 from jev_wiki.engine import RUBRIC_VERSION, Engine  # noqa: E402
 from jev_wiki.provider import JevProvider, ProviderError  # noqa: E402
 
 KS = (1, 3, 5, 10)
 SHORTLIST = 24  # Engine.recall's lexical shortlist size.
-STOP = {"the", "a", "an", "and", "or", "to", "of", "is", "are", "was", "what", "how", "i"}
 
 
-def words(text: str) -> list[str]:
-    return [w for w in re.findall(r"[\w]+", text.casefold()) if w not in STOP]
-
-
-def bm25_rank(query: str, docs: list[str], k1: float = 1.2, b: float = 0.75) -> list[int]:
-    tokenized = [words(d) for d in docs]
-    n = len(tokenized)
-    avg = sum(map(len, tokenized)) / n if n else 0
-    df = Counter(t for doc in tokenized for t in set(doc))
-    q = set(words(query))
-    scores = []
-    for i, doc in enumerate(tokenized):
-        tf = Counter(doc)
-        score = 0.0
-        for term in q & tf.keys():
-            idf = math.log(1 + (n - df[term] + 0.5) / (df[term] + 0.5))
-            f = tf[term]
-            score += idf * f * (k1 + 1) / (f + k1 * (1 - b + b * len(doc) / (avg or 1)))
-        scores.append(score)
-    return [i for i in sorted(range(n), key=lambda i: (-scores[i], i)) if scores[i] > 0]
+def bm25_rank(query: str, docs: list[str]) -> list[int]:
+    """Indices of documents matching any query term, best BM25 score first."""
+    scores = bm25_scores(query, docs)
+    return [i for i in sorted(range(len(docs)), key=lambda i: (-scores[i], i)) if scores[i] > 0]
 
 
 def score_sessions(ranked: list[str], expected: set[str]) -> dict:
