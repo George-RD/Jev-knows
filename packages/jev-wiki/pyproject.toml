@@ -11,6 +11,10 @@ readme = "README.md"
 license = {text = "Apache-2.0"}
 dependencies = []
 
+[project.optional-dependencies]
+# Local embedding candidates for recall; enable with JEV_WIKI_EMBEDDING_MODEL.
+embed = ["model2vec>=0.4"]
+
 [project.scripts]
 jev-wiki = "jev_wiki.cli:main"
 

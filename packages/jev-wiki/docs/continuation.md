@@ -15,8 +15,12 @@ and software tests are not evidence of semantic performance.
 1. If relevant sources miss the lexical shortlist, add a bounded candidate-expansion
    step (JEV topic routing or optional embeddings), then compare against the same queries.
    Partly done offline: BM25 ([bm25-shortlist-2026-09-27.md](bm25-shortlist-2026-09-27.md))
-   and a source-context lift
-   ([source-context-shortlist-2026-09-27.md](source-context-shortlist-2026-09-27.md)).
+   a source-context lift
+   ([source-context-shortlist-2026-09-27.md](source-context-shortlist-2026-09-27.md)),
+   and optional local embedding candidates
+   ([embedding-candidates-2026-09-27.md](embedding-candidates-2026-09-27.md)). JEV topic
+   routing is untested: it needs live intake labels. Rerun the live sweep with the
+   embedder on once credits return.
 2. Done in rubric `wiki-v2`: sentence candidates with neighbouring context and exact
    offsets, plus keep wording that values personal facts. See
    [intake-sentence-claims-2026-09-27.md](intake-sentence-claims-2026-09-27.md).

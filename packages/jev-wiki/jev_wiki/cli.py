@@ -124,7 +124,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     use_provider = args.command in {"ingest", "process", "worker", "maintain", "recall"}
     if args.command == "recall" and args.offline:
         use_provider = False
-    engine = Engine(args.root, provider=_provider(args) if use_provider else None)
+    embedder = None
+    # --offline promises lexical retrieval; loading a model by name can reach the network.
+    if args.command == "recall" and not args.offline:
+        from .embedding import from_env
+
+        embedder = from_env()
+    engine = Engine(
+        args.root, provider=_provider(args) if use_provider else None, embedder=embedder
+    )
     if args.command == "init":
         from .hooks import _path, _publish_once
 
