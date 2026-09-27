@@ -228,13 +228,16 @@ def run_question(item: dict, model: str) -> dict:
     with tempfile.TemporaryDirectory(prefix="jev-lme-") as root:
         engine = Engine(root, provider)
         statuses = Counter()
+        candidates = 0
         for key, text in zip(keys, texts):
             if not text:
                 statuses["empty"] += 1
                 continue
             result = engine.ingest(text, source_key=key, title=key, metadata={"role": "user"})
             statuses[result["status"]] += 1
+            candidates += result.get("candidates", 0)
         row["ingest_statuses"] = dict(statuses)
+        row["candidates"] = candidates
         row["ingest_seconds"] = time.perf_counter() - started
         key_of = {s["id"]: s["source_key"] for s in engine.store.sources()}
         stored = engine.store.claims(active_only=False)
