@@ -53,11 +53,15 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 
 from jev_wiki import __version__  # noqa: E402
 from jev_wiki.bm25 import bm25_scores  # noqa: E402
-from jev_wiki.engine import RUBRIC_VERSION, Engine  # noqa: E402
+from jev_wiki.engine import (  # noqa: E402
+    RUBRIC_VERSION,
+    SHORTLIST_BYTES,
+    SHORTLIST_SIZE,
+    Engine,
+)
 from jev_wiki.provider import JevProvider, ProviderError  # noqa: E402
 
 KS = (1, 3, 5, 10)
-SHORTLIST = 24  # Engine.recall's lexical shortlist size.
 
 
 def bm25_rank(query: str, docs: list[str]) -> list[int]:
@@ -123,12 +127,17 @@ def admits(claim: dict, threshold: float | None) -> bool:
 
 
 def shortlist_by_bm25(query: str, claims: list[dict]) -> list[dict]:
-    """The engine's shortlist bounds (24 claims, 14 KB), filled in plain BM25 order."""
+    """The engine's shortlist bounds (24 claims, 14 KB), filled in plain BM25 order.
+
+    As in the engine, a claim too large for the remaining budget is skipped.
+    """
     picked, size = [], 0
-    for i in bm25_rank(query, [c["text"] for c in claims])[:SHORTLIST]:
-        cost = len(claims[i]["text"].encode("utf-8")) + 100
-        if size + cost > 14_000:
+    for i in bm25_rank(query, [c["text"] for c in claims]):
+        if len(picked) >= SHORTLIST_SIZE:
             break
+        cost = len(claims[i]["text"].encode("utf-8")) + 100
+        if size + cost > SHORTLIST_BYTES:
+            continue
         picked.append(claims[i])
         size += cost
     return picked
