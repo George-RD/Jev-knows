@@ -30,6 +30,10 @@ EVIDENCE_PREFIX = (
     "<untrusted_memory_evidence>\n"
 )
 EVIDENCE_SUFFIX = "\n</untrusted_memory_evidence>"
+# Of the 0.75 s hook budget, embedding (model load plus any claims not yet indexed)
+# may run until this long after the hook starts. Claim similarities come after the
+# store load and BM25, so this leaves the rest of the budget for packing the context.
+HOOK_EMBEDDING_SECONDS = 0.55
 
 
 class HookTimeout(Exception):
@@ -171,6 +175,22 @@ def queue_event(
     return source_key
 
 
+def _hook_embedder(root: Path, started: float) -> Any:
+    """The configured embedder, if it loads from local files within the hook's budget.
+
+    Never downloads. Loading, and encoding claims the worker has not indexed yet, must
+    finish within HOOK_EMBEDDING_SECONDS of the hook starting; otherwise this recall
+    stays lexical. Vectors encoded here are persisted for the next prompt.
+    """
+    from .embedding import VECTOR_DIR, from_env
+
+    try:
+        cache_dir = _path(root, VECTOR_DIR)
+    except ValueError:
+        return None  # A symlinked vector directory: stay lexical rather than follow it.
+    return from_env(local_only=True, cache_dir=cache_dir, deadline=started + HOOK_EMBEDDING_SECONDS)
+
+
 def _evidence(context: str, max_chars: int) -> str:
     packet = EVIDENCE_PREFIX + html.escape(context, quote=False) + EVIDENCE_SUFFIX
     # An evidence quotation and its citation are indivisible. Drop a packet
@@ -190,6 +210,7 @@ def handle_hook(
     Missing scope, malformed input, storage failures and retrieval failures all
     produce an empty result. No transcript path is read, even if one is supplied.
     """
+    started = time.monotonic()
     try:
         if not isinstance(payload, dict) or len(_canonical(payload)) > MAX_PAYLOAD_BYTES:
             return {}
@@ -215,7 +236,7 @@ def handle_hook(
         if context_budget < 256:
             return {}
         query = text if len(text) <= 2_000 else text[:1_000] + text[-1_000:]
-        result = Engine(root).recall(
+        result = Engine(root, embedder=_hook_embedder(root, started)).recall(
             query,
             limit=5,
             max_chars=context_budget,

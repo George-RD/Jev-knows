@@ -126,10 +126,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         use_provider = False
     embedder = None
     # --offline promises lexical retrieval; loading a model by name can reach the network.
-    if args.command == "recall" and not args.offline:
-        from .embedding import from_env
+    if args.command in {"recall", "worker"} and not getattr(args, "offline", False):
+        from .embedding import VECTOR_DIR, from_env
 
-        embedder = from_env()
+        embedder = from_env(cache_dir=Path(args.root) / VECTOR_DIR)
     engine = Engine(
         args.root, provider=_provider(args) if use_provider else None, embedder=embedder
     )
@@ -167,6 +167,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         result = {"inbox": drained, **_process_pending(engine, args.limit)}
         if not args.no_maintain:
             result["maintenance"] = engine.maintain(max_pairs=args.max_pairs)
+        if embedder is not None:
+            # Index new claims now, so the prompt hook finds their vectors on disk.
+            try:
+                _, encoded = embedder.vectors([c["text"] for c in engine.store.claims()])
+                result["embeddings"] = {"model": embedder.name, "encoded": encoded}
+            except (OSError, ValueError) as error:
+                # Optional: the hook encodes what is missing or stays lexical.
+                result["embeddings"] = {"model": embedder.name, "error": type(error).__name__}
         return result
     if args.command == "recall":
         return engine.recall(

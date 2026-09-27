@@ -158,6 +158,7 @@ class CliEmbedderTests(unittest.TestCase):
         from jev_wiki import cli
 
         with tempfile.TemporaryDirectory() as root:
+            self.root = Path(root)
             args = cli._parser().parse_args(
                 ["--root", root, "--provider", "none", "recall", "basil", *flags]
             )
@@ -166,7 +167,7 @@ class CliEmbedderTests(unittest.TestCase):
         return built
 
     def test_recall_builds_the_configured_embedder(self):
-        self.recall().assert_called_once_with()
+        self.recall().assert_called_once_with(cache_dir=self.root / embedding.VECTOR_DIR)
 
     def test_offline_recall_never_loads_a_model(self):
         self.recall("--offline").assert_not_called()
@@ -184,7 +185,9 @@ class FromEnvTests(unittest.TestCase):
             mock.patch.object(embedding, "StaticEmbedder", failing),
         ):
             self.assertIsNone(embedding.from_env())
-        failing.assert_called_once_with(embedding.DEFAULT_MODEL)
+        failing.assert_called_once_with(
+            embedding.DEFAULT_MODEL, local_only=False, cache_dir=None, deadline=None
+        )
 
 
 if __name__ == "__main__":

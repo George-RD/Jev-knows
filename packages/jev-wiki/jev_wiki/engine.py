@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .bm25 import STOPWORDS, bm25_from_stats, query_terms, term_stats
+from .hooks import HookTimeout
 from .provider import ProviderError
 from .store import WikiStore
 
@@ -535,6 +536,8 @@ class Engine:
         if self.embedder is not None and claims:
             try:
                 similarities = self.embedder.similarities(query, [c["text"] for c in claims])
+            except HookTimeout:
+                raise  # The hook's own budget ran out: stop, do not continue lexically.
             except Exception:  # noqa: BLE001 - optional model; lexical candidates still stand.
                 similarities = None
         candidates = _candidates(claims, scores, lifted, similarities)
