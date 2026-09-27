@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jev_wiki.bm25 import bm25_scores, words
+from jev_wiki.bm25 import bm25_from_stats, bm25_scores, query_terms, term_stats, words
 from jev_wiki.engine import Engine
 from test_lifecycle import LifecycleDecisionFixture
 
@@ -43,6 +43,16 @@ class Bm25ScoreTests(unittest.TestCase):
         one, two, many = bm25_scores("atlas", ["atlas x", "atlas atlas", "atlas " * 50])
         self.assertLess(one, two)
         self.assertLess(many, 2.2 * two)
+
+    def test_combined_stats_match_scoring_the_concatenation(self):
+        parts = [("red kettle", "Atlas notes"), ("blue console", "Harbor"), ("atlas", "")]
+        terms = query_terms("atlas kettle")
+        combined = []
+        for text, title in parts:
+            (a, tf_a), (b, tf_b) = term_stats(text, terms), term_stats(title, terms)
+            combined.append((a + b, tf_a + tf_b))
+        joined = [f"{text} {title}" for text, title in parts]
+        self.assertEqual(bm25_from_stats(combined), bm25_scores("atlas kettle", joined))
 
 
 class EngineBm25ShortlistTests(unittest.TestCase):

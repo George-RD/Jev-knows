@@ -7,11 +7,12 @@ import heapq
 import json
 import math
 import re
+from collections import Counter
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
-from .bm25 import STOPWORDS, bm25_scores
+from .bm25 import STOPWORDS, bm25_from_stats, query_terms, term_stats
 from .provider import ProviderError
 from .store import WikiStore
 
@@ -366,10 +367,19 @@ class Engine:
             if claim["source_id"] in sources
         ]
         # BM25 over active claims plus their source titles: rare, repeated query terms
-        # outrank common ones, and long claims do not win on length alone.
-        scores = bm25_scores(
-            query, [c["text"] + " " + c["source"].get("title", "") for c in claims]
-        )
+        # outrank common ones, and long claims do not win on length alone. Each title
+        # is tokenized once per source and never copied into its claims.
+        terms = query_terms(query)
+        titles = {
+            sid: term_stats(source.get("title", ""), terms) for sid, source in sources.items()
+        }
+
+        def stats(claim: dict) -> tuple[int, Counter]:
+            length, tf = term_stats(claim["text"], terms)
+            title_length, title_tf = titles[claim["source_id"]]
+            return length + title_length, tf + title_tf
+
+        scores = bm25_from_stats(map(stats, claims)) if terms else [0.0] * len(claims)
         candidates = [
             {**claim, "lexical_score": score} for claim, score in zip(claims, scores) if score > 0
         ]
