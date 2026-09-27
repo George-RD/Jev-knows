@@ -203,9 +203,6 @@ SHORTLIST_SIZE = 24
 SHORTLIST_BYTES = 14_000
 # The best plain-BM25 claims always reach the ranker, whatever their source's score.
 PLAIN_BM25_GUARD = 12
-# With an embedder, the best lexical claims take this many slots and the claims most
-# similar to the query fill the rest, so neither source can crowd out the other.
-LEXICAL_SLOTS = 12
 # Reciprocal-rank fusion orders a mixed shortlist: 1/(k + rank) per source, with the
 # embedding rank counted twice (docs/embedding-candidates-2026-09-27.md).
 FUSION_K = 10
@@ -259,8 +256,8 @@ def _shortlist(candidates: list[dict]) -> list[dict]:
     remaining budget is skipped rather than ending the fill.
 
     Candidates with a ``semantic_score`` (an embedder is configured) are taken as the
-    LEXICAL_SLOTS best lexical matches by context score, then the most similar claims,
-    then further lexical matches if room remains.
+    same PLAIN_BM25_GUARD claims, then the most similar claims, then further lexical
+    matches by context score if room remains.
     """
 
     def by_plain(c: dict) -> tuple:
@@ -276,7 +273,8 @@ def _shortlist(candidates: list[dict]) -> list[dict]:
     if any("semantic_score" in c for c in candidates):
         similar = [c for c in candidates if c["semantic_score"] >= MIN_SIMILARITY]
         pools = (
-            (sorted(matched, key=by_context), LEXICAL_SLOTS),
+            # The guard doubles as the lexical half, so neither source crowds out the other.
+            (sorted(matched, key=by_plain), PLAIN_BM25_GUARD),
             (sorted(similar, key=by_similarity), SHORTLIST_SIZE),
             # Too few similar claims: lexical matches take the remaining room.
             (sorted(matched, key=by_context), SHORTLIST_SIZE),

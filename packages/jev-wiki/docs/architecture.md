@@ -78,7 +78,7 @@ the query's topic can overtake one that matched nearly as well on the query's fi
 words alone. The twelve best plain-BM25 claims always stay in the 24-claim shortlist,
 so a source full of filler matches cannot crowd out a rare-term match before JEV
 reranks. With an optional local embedder (the `embed` extra and
-`JEV_WIKI_EMBEDDING_MODEL`; CLI `recall` without `--offline`), the twelve best lexical claims share the shortlist with
+`JEV_WIKI_EMBEDDING_MODEL`; CLI `recall` without `--offline`), the twelve best plain-BM25 claims share the shortlist with
 the claims most similar to the query, ordered by reciprocal-rank fusion, so evidence
 with no shared words can reach the ranker; claims below 0.2 similarity are never
 added. See [embedding-candidates-2026-09-27.md](embedding-candidates-2026-09-27.md).

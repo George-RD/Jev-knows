@@ -10,8 +10,8 @@ from unittest import mock
 
 from jev_wiki import embedding
 from jev_wiki.engine import (
-    LEXICAL_SLOTS,
     MIN_SIMILARITY,
+    PLAIN_BM25_GUARD,
     SHORTLIST_BYTES,
     SHORTLIST_SIZE,
     Engine,
@@ -106,8 +106,19 @@ class EmbeddingShortlistTests(unittest.TestCase):
         picked = _shortlist(_candidates(claims, scores, scores, similarities))
         ids = {c["id"] for c in picked}
         self.assertEqual(len(picked), SHORTLIST_SIZE)
-        self.assertTrue({c["id"] for c in lexical[:LEXICAL_SLOTS]} <= ids)
-        self.assertTrue({c["id"] for c in similar[: SHORTLIST_SIZE - LEXICAL_SLOTS]} <= ids)
+        self.assertTrue({c["id"] for c in lexical[:PLAIN_BM25_GUARD]} <= ids)
+        self.assertTrue({c["id"] for c in similar[: SHORTLIST_SIZE - PLAIN_BM25_GUARD]} <= ids)
+
+    def test_rare_plain_match_survives_lifted_filler_and_similar_claims(self):
+        filler = self.claims(12, "f")
+        rare = {"id": "rare", "source_id": "s", "text": "x" * 40}
+        similar = self.claims(12, "e")
+        claims = [*filler, rare, *similar]
+        plain = [1.0] * 12 + [5.0] + [0.0] * 12
+        lifted = [9.0] * 12 + [5.0] + [0.0] * 12
+        similarities = [0.0] * 13 + [0.9] * 12
+        picked = {c["id"] for c in _shortlist(_candidates(claims, plain, lifted, similarities))}
+        self.assertIn("rare", picked)
 
     def test_lexical_matches_fill_room_the_similar_claims_leave(self):
         claims = self.claims(30, "l")

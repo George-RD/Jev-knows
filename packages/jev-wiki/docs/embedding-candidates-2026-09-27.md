@@ -28,7 +28,7 @@ reports mode `hybrid`.
 
 With an embedder, recall computes each active claim's cosine similarity to the query:
 
-- The twelve best lexical claims (by source-context score) are taken first, then the
+- The twelve best plain-BM25 claims (the existing guard) are taken first, then the
   claims most similar to the query, then further lexical matches if room remains. The
   24-claim and 14 KB bounds are unchanged.
 - The shortlist is ordered by reciprocal-rank fusion, `1/(10 + lexical rank) +
