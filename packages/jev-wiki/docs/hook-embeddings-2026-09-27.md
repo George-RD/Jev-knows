@@ -35,9 +35,11 @@ supported; other layouts fail to load, and recall stays lexical.
 
 Claim vectors are saved in `<root>/embeddings/<model>.vec`: a header (format, model
 fingerprint, dimension), then one record per claim (SHA-256 of the claim text, float32
-unit vector). The fingerprint hashes the tokenizer, the table header, sixteen samples
-of the table and an encoding version, so two copies of one model share vectors and a
-change to the encoding code invalidates them.
+unit vector). The fingerprint covers the tokenizer, an encoding version (so a change to
+the encoding code invalidates old vectors) and the exact weights: in a Hugging Face
+cache the weights blob is named by the SHA-256 of its content, and any other weights
+file is identified by its path, size, inode and modification time, since hashing the
+whole file would cost the hook's budget.
 
 - New vectors are appended. The worker indexes every active claim after processing
   (`"embeddings": {"encoded": n}` in its output), and CLI `recall` saves what it

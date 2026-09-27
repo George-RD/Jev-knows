@@ -194,12 +194,30 @@ class StaticEmbedderTests(unittest.TestCase):
         similarities = self.embedder().similarities("dinner", ["basil", "report"])
         self.assertGreater(similarities[0], similarities[1])
 
-    def test_copies_of_one_model_share_vectors(self):
+    def test_replaced_weights_of_the_same_size_invalidate_vectors(self):
         self.embedder().vectors(["basil"])
-        copy = write_model(self.tmp / "copy")
-        shared = embedding.StaticEmbedder(str(copy), cache_dir=self.cache)
-        self.assertEqual(shared.fingerprint, self.embedder().fingerprint)
-        self.assertEqual(shared.vectors(["basil"])[1], 0)
+        weights = self.model / "model.safetensors"
+        data = bytearray(weights.read_bytes())
+        data[-1] ^= 0xFF  # One byte of the last token row.
+        weights.unlink()
+        weights.write_bytes(bytes(data))
+        self.assertEqual(self.embedder().vectors(["basil"])[1], 1)
+
+    def test_hub_blobs_are_identified_by_their_content_digest(self):
+        repo = self.tmp / "hub" / "models--org--tiny"
+        snapshots = []
+        for name in ("one", "two"):
+            snapshot = write_model(repo / "snapshots" / name)
+            blob = repo / "blobs" / ("a" * 64)
+            blob.parent.mkdir(parents=True, exist_ok=True)
+            if not blob.exists():
+                (snapshot / "model.safetensors").rename(blob)
+            else:
+                (snapshot / "model.safetensors").unlink()
+            (snapshot / "model.safetensors").symlink_to(blob)
+            snapshots.append(embedding.StaticEmbedder(str(snapshot)).fingerprint)
+        self.assertEqual(snapshots[0], snapshots[1])
+        self.assertNotEqual(snapshots[0], self.embedder().fingerprint)
 
     def test_encoding_cap_saves_part_of_a_backlog_per_call(self):
         texts = ["basil", "report", "garden", "friday", "tomatoes"]

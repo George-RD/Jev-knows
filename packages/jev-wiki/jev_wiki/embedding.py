@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import struct
 import tempfile
@@ -164,7 +165,7 @@ class StaticEmbedder:
         self._weights = tensor("weights", _DTYPES)
         self._mapping = tensor("mapping", _INDEX_DTYPES)
         self.dim = int(self._table.shape[1])
-        self.fingerprint = self._fingerprint(weights_path, tokenizer_path, start)
+        self.fingerprint = self._fingerprint(weights_path, tokenizer_path)
         self._record = np.dtype([("key", "u1", (32,)), ("vector", "<f4", (self.dim,))])
         self._memory: dict[bytes, Any] = {}
         self._disk: tuple[dict[bytes, int], Any] | None = None
@@ -175,22 +176,23 @@ class StaticEmbedder:
         self._check_deadline()
 
     @staticmethod
-    def _fingerprint(weights_path: Path, tokenizer_path: Path, data_start: int) -> bytes:
-        """Identify the model by content, wherever it is stored, plus the encoding code.
+    def _fingerprint(weights_path: Path, tokenizer_path: Path) -> bytes:
+        """Identify the model's exact weights and tokenizer, plus the encoding code.
 
-        Hashes the tokenizer, the tensor table header, and sixteen 4 KiB samples of the
-        tensor data, so two copies of one model share persisted vectors.
+        A Hugging Face cache stores the weights as a blob named by the SHA-256 of its
+        whole content, which is used as is. Any other weights file is identified by
+        its path, size, inode and modification time, since hashing 100+ MB would cost
+        the hook's budget; replacing the file changes these.
         """
         digest = hashlib.sha256(f"jev-wiki-encoding-{ENCODING_VERSION}".encode())
         digest.update(tokenizer_path.read_bytes())
-        size = weights_path.stat().st_size
-        with weights_path.open("rb") as stream:
-            digest.update(stream.read(data_start))
-            span = max(0, size - data_start - 4_096)
-            for step in range(16):
-                stream.seek(data_start + span * step // 15)
-                digest.update(stream.read(4_096))
-        digest.update(str(size).encode())
+        blob = weights_path.resolve()
+        if blob.parent.name == "blobs" and re.fullmatch(r"[0-9a-f]{64}", blob.name):
+            digest.update(f"sha256:{blob.name}".encode())
+        else:
+            info = blob.stat()
+            identity = [str(blob), info.st_size, info.st_ino, info.st_mtime_ns]
+            digest.update(json.dumps(identity).encode("utf-8"))
         return digest.digest()
 
     def _check_deadline(self) -> None:
