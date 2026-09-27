@@ -230,7 +230,6 @@ class HookTests(unittest.TestCase):
         failed = [inbox / f"{i:064x}.json" for i in range(5)]
         for broken in failed:
             broken.write_text('{"broken":true}')
-            os.utime(broken, (1, 1))  # older than anything queued later
         self.assertEqual(drain_inbox(self.root, CaptureEngine(), limit=5)["failed"], 5)
         self.handle(self.payload(prompt="A newer prompt to capture."))
         # Directory order is arbitrary; list the failed events first.
@@ -239,6 +238,22 @@ class HookTests(unittest.TestCase):
             result = drain_inbox(self.root, CaptureEngine(), limit=5)
         self.assertEqual(result["captured"], 1)
         self.assertEqual(len(self.events()), 5)
+
+    def test_failed_events_take_turns(self):
+        self.handle()
+        inbox = self.events()[0].parent
+        self.events()[0].unlink()
+        failed = [inbox / f"{i:064x}.json" for i in range(3)]
+        for broken in failed:
+            broken.write_text('{"broken":true}')
+        attempted = []
+        for _ in range(6):
+            with patch("jev_wiki.hooks._load_event", side_effect=ValueError) as load:
+                drain_inbox(self.root, CaptureEngine(), limit=1)
+            attempted.append(load.call_args.args[0])
+            time.sleep(0.01)
+        # Once all have failed, they keep rotating rather than retrying one file.
+        self.assertEqual(set(attempted[3:]), set(failed))
 
     def test_forgetting_queued_event_prevents_replay(self):
         self.handle()

@@ -276,9 +276,9 @@ def drain_inbox(root: str | Path, engine: Any, *, limit: int = 100) -> dict[str,
     result: dict[str, Any] = {"captured": 0, "failed": 0, "source_keys": []}
     if not inbox.exists():
         return result
-    # Oldest first, but events that already failed go last: a failure is marked
-    # by resetting its mtime to the epoch, so it cannot starve new events of the
-    # per-run limit.
+    # Oldest first, but events that already failed go last: a failure moves the
+    # mtime back by a fixed offset, so failed events cannot starve new ones and
+    # still take turns among themselves in failure order.
     paths = sorted(inbox.glob("*.json"), key=_drain_order)
     for index, path in enumerate(paths):
         if index >= max(0, limit):
@@ -310,19 +310,23 @@ def drain_inbox(root: str | Path, engine: Any, *, limit: int = 100) -> dict[str,
             # Keep failed events for inspection/retry; never delete uncaptured data.
             result["failed"] += 1
             with suppress(OSError):
-                os.utime(path, (_FAILED_MTIME, _FAILED_MTIME))
+                failed_at = time.time() - _FAILED_OFFSET
+                os.utime(path, (failed_at, failed_at))
     return result
 
 
-_FAILED_MTIME = 0
+# Failed events are stamped this far in the past; anything older than the
+# cutoff is treated as already failed.
+_FAILED_OFFSET = 1_500_000_000
+_FAILED_CUTOFF = 1_000_000_000
 
 
 def _drain_order(path: Path) -> tuple[bool, float, str]:
     try:
         mtime = path.stat().st_mtime
     except OSError:
-        mtime = _FAILED_MTIME
-    return (mtime == _FAILED_MTIME, mtime, path.name)
+        mtime = 0.0
+    return (mtime < _FAILED_CUTOFF, mtime, path.name)
 
 
 def forget_spool(root: str | Path, source_key: str) -> int:
