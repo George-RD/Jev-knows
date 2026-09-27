@@ -26,9 +26,16 @@ class CandidateSpanTests(unittest.TestCase):
             ],
         )
 
-    def test_abbreviations_and_initials_do_not_end_a_sentence(self):
-        text = "Dr. Patel moved our check-up, e.g. to March, and J. Smith agreed to it."
+    def test_known_abbreviations_do_not_end_a_sentence(self):
+        text = "Dr. Patel moved our check-up, e.g. to March, and Mr. Smith agreed to it."
         self.assertEqual(self.texts(text), [text])
+
+    def test_numbers_and_single_letters_still_end_a_sentence(self):
+        text = "My daughter just turned 7. Can you suggest a party theme for vitamin D."
+        self.assertEqual(
+            self.texts(text),
+            ["My daughter just turned 7.", "Can you suggest a party theme for vitamin D."],
+        )
 
     def test_short_fragments_join_a_neighbour(self):
         text = "Thanks! I adopted a greyhound named Pip last week.\nOk."

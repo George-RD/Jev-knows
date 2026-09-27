@@ -14,7 +14,9 @@ from typing import Any
 from .provider import ProviderError
 from .store import WikiStore
 
-RUBRIC_VERSION = "wiki-v2"
+RUBRIC_VERSION = "wiki-v2"  # Intake: candidate boundaries and keep/kind/topic questions.
+# Relation checks did not change with intake; bumping this re-checks every pair.
+RELATION_RUBRIC_VERSION = "wiki-v1"
 KINDS = {
     "fact": "An asserted fact about the world; not independently verified",
     "decision": "A decision actually made, with its stated scope",
@@ -99,7 +101,8 @@ def _bounded(text: str, start: int, stop: int, max_chars: int) -> list[dict]:
 
 # A terminator, optional closing quotes/brackets, then whitespace; or a line break.
 _SENTENCE_END = re.compile(r"[.!?\u2026]+[\"'\u201d\u2019)\]]*(?=\s)|(?=\n)")
-_ABBREVIATION = re.compile(r"(?:\b(?:mr|mrs|ms|dr|st|vs|etc|no|e\.g|i\.e)|\b\w)\.$", re.I)
+# Only unambiguous abbreviations: "is 7." or "vitamin D." must still end a sentence.
+_ABBREVIATION = re.compile(r"\b(?:mr|mrs|ms|dr|vs|e\.g|i\.e)\.$", re.I)
 MIN_CLAIM_CHARS = 25
 
 
@@ -477,7 +480,7 @@ class Engine:
                 checked = {
                     r.get("target")
                     for r in left.get("relations", [])
-                    if r.get("rubric_version") == RUBRIC_VERSION
+                    if r.get("rubric_version") == RELATION_RUBRIC_VERSION
                 }
                 for j in range(i + 1, len(claims)):
                     right = claims[j]
@@ -532,7 +535,7 @@ class Engine:
                     annotation = {
                         "type": relation,
                         "confidence": _confidence(answer),
-                        "rubric_version": RUBRIC_VERSION,
+                        "rubric_version": RELATION_RUBRIC_VERSION,
                     }
                     if not self.store.relate(left["id"], right["id"], annotation):
                         continue
