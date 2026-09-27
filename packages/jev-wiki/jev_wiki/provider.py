@@ -180,7 +180,8 @@ def _validated_answers(raw: object, questions: dict[str, dict], model: str) -> d
             value = answer.get("choice")
             if not isinstance(value, str) or value not in expected:
                 raise ProviderError("JEV response selected an unknown choice")
-            if probabilities[value] + 0.005 < max(probabilities.values()):
+            # Rounding can put a near-tie winner up to a hundredth below the runner-up.
+            if probabilities[value] + 0.01 + 1e-9 < max(probabilities.values()):
                 raise ProviderError("JEV response choice is not the highest-probability option")
         else:
             value = _number(answer.get("score"), 0, len(expected) - 1, "score")
@@ -188,7 +189,10 @@ def _validated_answers(raw: object, questions: dict[str, dict], model: str) -> d
             if legend != {str(i): level for i, level in enumerate(question["criteria"])}:
                 raise ProviderError("JEV response score legend does not match the criteria")
             expectation = sum(int(key) * probability for key, probability in probabilities.items())
-            if not math.isclose(value, expectation, abs_tol=0.025):
+            # Each rounded probability p_i moves the expectation by up to 0.005 * i;
+            # the score itself is rounded too.
+            drift = 0.005 * sum(range(len(expected))) + 0.01
+            if not math.isclose(value, expectation, abs_tol=max(0.025, drift)):
                 raise ProviderError(
                     "JEV response score does not match its probability distribution"
                 )

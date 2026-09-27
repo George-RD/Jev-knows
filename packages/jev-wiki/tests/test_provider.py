@@ -187,6 +187,39 @@ class ProviderTests(unittest.TestCase):
         provider = JevProvider("key", transport=RecordingTransport([mutate]))
         self.assertEqual(provider.ask("source", {"q": question})["q"]["value"], "l0")
 
+    def test_rounded_near_tie_choice_is_accepted_but_a_clear_loser_is_not(self):
+        # Observed live: keep/review/discard answered "review" at 0.47 against 0.48.
+        question = {"type": "choice", "prompt": "Pick one.", "choices": {"a": "A", "b": "B"}}
+
+        def answer(probabilities):
+            return lambda body: body["answers"]["q"].update(choice="a", probabilities=probabilities)
+
+        tie = JevProvider("key", transport=RecordingTransport([answer({"a": 0.49, "b": 0.5})]))
+        self.assertEqual(tie.ask("source", {"q": question})["q"]["value"], "a")
+        loser = JevProvider("key", transport=RecordingTransport([answer({"a": 0.4, "b": 0.6})]))
+        with self.assertRaises(ProviderError):
+            loser.ask("source", {"q": question})
+
+    def test_score_tolerates_rounded_four_level_distribution(self):
+        levels = ["Unrelated", "Tangential", "Useful", "Direct"]
+        question = {"type": "score", "prompt": "Rate", "levels": levels}
+        # Unrounded 0.004/0.004/0.004/0.988 → score 2.976; each probability rounds down.
+
+        def mutate(body, score):
+            body["answers"]["q"].update(
+                score=score,
+                legend={str(i): level for i, level in enumerate(levels)},
+                probabilities={"0": 0.0, "1": 0.0, "2": 0.0, "3": 1.0},
+            )
+
+        close = RecordingTransport([lambda body: mutate(body, 2.97)])
+        self.assertEqual(
+            JevProvider("key", transport=close).ask("s", {"q": question})["q"]["value"], 2.97
+        )
+        far = RecordingTransport([lambda body: mutate(body, 2.5)])
+        with self.assertRaises(ProviderError):
+            JevProvider("key", transport=far).ask("s", {"q": question})
+
     def test_noul_probability_not_boolean_and_invalid_score_rejected(self):
         mutations_and_questions = [
             (
