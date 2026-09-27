@@ -20,7 +20,7 @@ capture policy.
 Our choices are:
 
 - Keep the first installation local and inspectable: immutable raw revisions,
-  canonical JSON state, generated Markdown and lexical candidate search in memory.
+  canonical JSON state, generated Markdown and BM25 candidate search in memory.
 - Select and classify source sentences instead of asking JEV to invent claims,
   names or prose. Copy accepted text directly from source evidence.
 - Use the same narrow provider contract for filtering, ranking and pair
@@ -70,8 +70,9 @@ validated decisions and renders the resulting pages. A provider failure must lea
 raw evidence available and work recoverable; it must not create successful-looking
 model output.
 
-`recall` makes a lexical shortlist, optionally asks JEV to judge relevance, and emits
-a bounded context pack with citations. The shortlist is a real recall limitation:
+`recall` makes a BM25 shortlist over active claims and their source titles,
+optionally asks JEV to judge relevance, and emits a bounded context pack with
+citations. The shortlist is a real recall limitation:
 reranking cannot recover a passage never offered as a candidate. Unmatched queries
 must not be padded with unrelated material merely to reach `limit`.
 

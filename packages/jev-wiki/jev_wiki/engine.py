@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+from .bm25 import STOPWORDS, bm25_scores
 from .provider import ProviderError
 from .store import WikiStore
 
@@ -68,8 +69,7 @@ def _confidence(answer: dict) -> float:
 
 
 def _tokens(text: str) -> set[str]:
-    stop = {"the", "a", "an", "and", "or", "to", "of", "is", "are", "was", "what", "how", "i"}
-    return set(re.findall(r"[\w]+", text.casefold())) - stop
+    return set(re.findall(r"[\w]+", text.casefold())) - STOPWORDS
 
 
 def paragraph_spans(text: str, max_chars: int = 1600) -> list[dict]:
@@ -359,16 +359,20 @@ class Engine:
             raise ValueError("query must contain 1–2000 characters")
         if not 1 <= limit <= 20 or not 256 <= max_chars <= 20_000:
             raise ValueError("limit must be 1–20; max_chars must be 256–20000")
-        words = _tokens(query)
         sources = {s["id"]: s for s in self.store.sources()}
-        candidates = []
-        for claim in self.store.claims():
-            source = sources.get(claim["source_id"])
-            if source is None:
-                continue
-            overlap = len(words & _tokens(claim["text"] + " " + source.get("title", "")))
-            if overlap:
-                candidates.append({**claim, "source": source, "lexical_score": overlap})
+        claims = [
+            {**claim, "source": sources[claim["source_id"]]}
+            for claim in self.store.claims()
+            if claim["source_id"] in sources
+        ]
+        # BM25 over active claims plus their source titles: rare, repeated query terms
+        # outrank common ones, and long claims do not win on length alone.
+        scores = bm25_scores(
+            query, [c["text"] + " " + c["source"].get("title", "") for c in claims]
+        )
+        candidates = [
+            {**claim, "lexical_score": score} for claim, score in zip(claims, scores) if score > 0
+        ]
         candidates.sort(key=lambda c: (-c["lexical_score"], c["id"]))
         # Bound state, as well as candidate count, for JEV's shared context.
         shortlist = []
