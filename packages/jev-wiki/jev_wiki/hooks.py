@@ -15,7 +15,7 @@ import stat
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -311,7 +311,11 @@ def drain_inbox(root: str | Path, engine: Any, *, limit: int = 100) -> dict[str,
     result: dict[str, Any] = {"captured": 0, "failed": 0, "source_keys": []}
     if not inbox.exists():
         return result
-    for index, path in enumerate(inbox.glob("*.json")):
+    # Oldest first, but events that already failed go last: a failure moves the
+    # mtime back by a fixed offset, so failed events cannot starve new ones and
+    # still take turns among themselves in failure order.
+    paths = sorted(inbox.glob("*.json"), key=_drain_order)
+    for index, path in enumerate(paths):
         if index >= max(0, limit):
             break
         try:
@@ -340,7 +344,24 @@ def drain_inbox(root: str | Path, engine: Any, *, limit: int = 100) -> dict[str,
         except (OSError, ValueError, KeyError, TypeError):
             # Keep failed events for inspection/retry; never delete uncaptured data.
             result["failed"] += 1
+            with suppress(OSError):
+                failed_at = time.time() - _FAILED_OFFSET
+                os.utime(path, (failed_at, failed_at))
     return result
+
+
+# Failed events are stamped this far in the past; anything older than the
+# cutoff is treated as already failed.
+_FAILED_OFFSET = 1_500_000_000
+_FAILED_CUTOFF = 1_000_000_000
+
+
+def _drain_order(path: Path) -> tuple[bool, float, str]:
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return (mtime < _FAILED_CUTOFF, mtime, path.name)
 
 
 def forget_spool(root: str | Path, source_key: str) -> int:

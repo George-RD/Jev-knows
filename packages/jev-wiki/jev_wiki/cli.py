@@ -91,6 +91,9 @@ def _process_pending(engine: Any, limit: int) -> dict[str, Any]:
     sources = [
         source for source in engine.store.sources() if source.get("processing") != "complete"
     ]
+    # Least recently attempted first, so persistently failing sources rotate
+    # behind new ones instead of consuming every run's limit.
+    sources.sort(key=lambda source: source.get("processing_attempted_at", ""))
     results = []
     for source in sources[:limit]:
         try:

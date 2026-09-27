@@ -173,7 +173,10 @@ def _validated_answers(raw: object, questions: dict[str, dict], model: str) -> d
         probabilities = {
             key: _number(value, 0, 1, "probability") for key, value in probabilities.items()
         }
-        if not math.isclose(sum(probabilities.values()), 1.0, abs_tol=0.005):
+        # The service rounds each probability to two decimals, so the sum can
+        # drift by up to half a hundredth per option.
+        tolerance = 0.005 * len(probabilities) + 1e-9
+        if not math.isclose(sum(probabilities.values()), 1.0, abs_tol=tolerance):
             raise ProviderError("JEV response probabilities do not sum to one")
         if kind == "choice":
             value = answer.get("choice")

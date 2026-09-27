@@ -305,6 +305,12 @@ class WikiStore:
                 raise ValueError("Cannot process an inactive source")
             if source.get("processing") == "complete" and status != "complete":
                 return
+            source["processing_attempted_at"] = _now()
+            if source.get("processing") == status and source.get("processing_error") == error:
+                # A repeated deferral records only the attempt time, so retries
+                # never grow the event log or re-render the wiki.
+                self._save(state, refresh=False)
+                return
             source["processing"] = status
             if error is None:
                 source.pop("processing_error", None)
