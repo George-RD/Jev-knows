@@ -10,8 +10,9 @@ A static model is a token-vector table plus a tokenizer, and a text's vector is 
 mean of its tokens' rows. ``StaticEmbedder`` reads that table memory-mapped instead of
 through model2vec's loader, so only the rows a text uses are read from disk: loading
 takes about 0.1 s instead of 0.8 s, which is what lets the prompt hook use it within
-its budget (docs/hook-embeddings-2026-09-27.md). Claim vectors can be persisted in a
-vector file per model under the memory root, so each recall encodes only new claims.
+its budget (docs/hook-embeddings-2026-09-27.md). Claim vectors can be persisted in an
+append-only vector file per model under the memory root, so each recall encodes only
+new claims.
 """
 
 from __future__ import annotations
@@ -36,22 +37,31 @@ VECTOR_DIR = "embeddings"
 # model2vec's default: texts are cut to this many tokens.
 MAX_TOKENS = 512
 ENCODE_BATCH = 256
+# Bump when encode() changes, so vectors persisted by older code are not reused.
+ENCODING_VERSION = 1
+# A vector file is rewritten without stale records once they outnumber live ones by
+# this many; only callers without a deadline (worker, CLI) rewrite.
+COMPACT_SLACK = 1_000
 
-_MAGIC = b"JEVVEC1\n"
-_HEADER = struct.Struct("<8s32sQQ")
+_MAGIC = b"JEVVEC2\n"
+_HEADER = struct.Struct("<8s32sQ")  # magic, model fingerprint, dim; then records.
 _DTYPES = {"F32": "<f4", "F16": "<f2"}
 _INDEX_DTYPES = {"I64": "<i8", "I32": "<i4", "U32": "<u4", "U64": "<u8"}
 
 
 class EmbeddingTimeout(Exception):
-    """The embedder ran past its caller's deadline; recall stays lexical."""
+    """The embedder ran past its caller's deadline or encoding cap; recall stays lexical."""
 
 
 def _hub_cache() -> Path:
-    if os.environ.get("HF_HUB_CACHE"):
-        return Path(os.environ["HF_HUB_CACHE"]).expanduser()
-    home = os.environ.get("HF_HOME") or Path("~/.cache/huggingface").expanduser()
-    return Path(home) / "hub"
+    """The Hugging Face hub cache, resolved as huggingface_hub resolves it."""
+    for variable in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        if os.environ.get(variable):
+            return Path(os.environ[variable]).expanduser()
+    if os.environ.get("HF_HOME"):
+        return Path(os.environ["HF_HOME"]).expanduser() / "hub"
+    cache = Path(os.environ.get("XDG_CACHE_HOME") or "~/.cache").expanduser()
+    return cache / "huggingface" / "hub"
 
 
 def _is_model_dir(path: Path) -> bool:
@@ -104,7 +114,9 @@ class StaticEmbedder:
     tokens dropped, at most MAX_TOKENS tokens, the mean of the (weighted) token rows.
     Vectors are unit length. ``deadline`` (a ``time.monotonic()`` value) makes loading
     and encoding raise EmbeddingTimeout once passed. With ``cache_dir``, claim vectors
-    are read from and written to one file per model there.
+    are read from and appended to one file per model there. ``max_new`` caps how many
+    claims one call encodes: past it, the capped share is encoded and saved, and the
+    call raises EmbeddingTimeout, so a backlog is worked off over several calls.
     """
 
     def __init__(
@@ -114,8 +126,10 @@ class StaticEmbedder:
         local_only: bool = False,
         cache_dir: str | Path | None = None,
         deadline: float | None = None,
+        max_new: int | None = None,
     ):
         self.deadline = deadline
+        self.max_new = max_new
         import numpy as np
         from tokenizers import Tokenizer
 
@@ -150,17 +164,34 @@ class StaticEmbedder:
         self._weights = tensor("weights", _DTYPES)
         self._mapping = tensor("mapping", _INDEX_DTYPES)
         self.dim = int(self._table.shape[1])
-        identity = []
-        for path in (weights_path, tokenizer_path):
-            info = path.stat()
-            identity.append([str(path.resolve()), info.st_size, info.st_mtime_ns])
-        self.fingerprint = hashlib.sha256(json.dumps(identity).encode("utf-8")).digest()
+        self.fingerprint = self._fingerprint(weights_path, tokenizer_path, start)
+        self._record = np.dtype([("key", "u1", (32,)), ("vector", "<f4", (self.dim,))])
         self._memory: dict[bytes, Any] = {}
         self._disk: tuple[dict[bytes, int], Any] | None = None
+        self._disk_ok = False
         self._cache_file = None
         if cache_dir is not None:
             self._cache_file = Path(cache_dir) / f"{self.fingerprint.hex()[:16]}.vec"
         self._check_deadline()
+
+    @staticmethod
+    def _fingerprint(weights_path: Path, tokenizer_path: Path, data_start: int) -> bytes:
+        """Identify the model by content, wherever it is stored, plus the encoding code.
+
+        Hashes the tokenizer, the tensor table header, and sixteen 4 KiB samples of the
+        tensor data, so two copies of one model share persisted vectors.
+        """
+        digest = hashlib.sha256(f"jev-wiki-encoding-{ENCODING_VERSION}".encode())
+        digest.update(tokenizer_path.read_bytes())
+        size = weights_path.stat().st_size
+        with weights_path.open("rb") as stream:
+            digest.update(stream.read(data_start))
+            span = max(0, size - data_start - 4_096)
+            for step in range(16):
+                stream.seek(data_start + span * step // 15)
+                digest.update(stream.read(4_096))
+        digest.update(str(size).encode())
+        return digest.digest()
 
     def _check_deadline(self) -> None:
         if self.deadline is not None and time.monotonic() > self.deadline:
@@ -197,78 +228,102 @@ class StaticEmbedder:
         return out
 
     def _load_disk(self) -> tuple[dict[bytes, int], Any]:
-        """The persisted vectors for this model, or an empty index if none are usable."""
+        """Persisted vectors for this model, last record per key winning, or none.
+
+        ``self._disk_ok`` records whether the file can be appended to: false when it
+        is missing, belongs to another format, or ends in a torn append.
+        """
         if self._disk is not None:
             return self._disk
-        self._disk = ({}, None)
+        np = self._np
+        self._disk, self._disk_ok = ({}, np.zeros(0, dtype=self._record)), False
         if self._cache_file is None or self._cache_file.parent.is_symlink():
             return self._disk
-        np = self._np
         try:
             fd = os.open(self._cache_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except OSError:
             return self._disk
         with os.fdopen(fd, "rb") as stream:
             info = os.fstat(stream.fileno())
-            head = stream.read(_HEADER.size)
-            if not stat.S_ISREG(info.st_mode) or len(head) != _HEADER.size:
+            if not stat.S_ISREG(info.st_mode) or info.st_size < _HEADER.size:
                 return self._disk
-            magic, fingerprint, count, dim = _HEADER.unpack(head)
-            expected = _HEADER.size + count * (32 + 4 * dim)
-            if (
-                magic != _MAGIC
-                or fingerprint != self.fingerprint
-                or dim != self.dim
-                or info.st_size != expected
-            ):
+            magic, fingerprint, dim = _HEADER.unpack(stream.read(_HEADER.size))
+            if magic != _MAGIC or fingerprint != self.fingerprint or dim != self.dim:
                 return self._disk
-            keys = stream.read(32 * count)
-            # Mapped, so only the rows a recall uses are read.
-            vectors = (
-                np.memmap(
-                    stream,
-                    dtype="<f4",
-                    mode="r",
-                    offset=_HEADER.size + 32 * count,
-                    shape=(count, dim),
-                )
-                if count
-                else np.zeros((0, dim), dtype="<f4")
+            count, torn = divmod(info.st_size - _HEADER.size, self._record.itemsize)
+            self._disk_ok = not torn
+            if not count:
+                return self._disk
+            # Mapped: a recall reads the keys, and vectors only as it indexes them.
+            records = np.memmap(
+                stream, dtype=self._record, mode="r", offset=_HEADER.size, shape=(count,)
             )
+        keys = records["key"].tobytes()
         index = {keys[i * 32 : (i + 1) * 32]: i for i in range(count)}
-        self._disk = (index, vectors)
+        self._disk = (index, records)
         return self._disk
 
-    def _persist(self, digests: list[bytes], matrix: Any) -> None:
-        """Replace this model's vector file with exactly these claims' vectors."""
+    def _records(self, known: dict[bytes, Any]) -> bytes:
+        records = self._np.zeros(len(known), dtype=self._record)
+        if known:
+            keys = self._np.frombuffer(b"".join(known), dtype="u1")
+            records["key"] = keys.reshape(-1, 32)
+            records["vector"] = self._np.stack(list(known.values()))
+        return records.tobytes()
+
+    def _write_all(self, known: dict[bytes, Any]) -> None:
+        """Replace this model's vector file with ``known``; drop other models' files."""
         directory = self._cache_file.parent
-        if directory.is_symlink():
-            raise ValueError("The vector directory must not be a symlink")
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        unique = dict(zip(digests, range(len(digests))))
-        rows = matrix[list(unique.values())].astype("<f4", copy=False)
         fd, temporary = tempfile.mkstemp(prefix=".vectors-", dir=directory)
         try:
             with os.fdopen(fd, "wb") as stream:
-                stream.write(_HEADER.pack(_MAGIC, self.fingerprint, len(unique), self.dim))
-                stream.write(b"".join(unique))
-                stream.write(rows.tobytes())
+                stream.write(_HEADER.pack(_MAGIC, self.fingerprint, self.dim))
+                stream.write(self._records(known))
             os.replace(temporary, self._cache_file)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-        # Vector files of other models (or older copies of this one) are stale.
         for other in directory.glob("*.vec"):
             if other.name != self._cache_file.name and not other.is_symlink():
                 other.unlink(missing_ok=True)
+
+    def _append(self, new: dict[bytes, Any]) -> None:
+        """Append whole records in one write, so concurrent appends do not interleave."""
+        fd = os.open(self._cache_file, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+        with os.fdopen(fd, "wb", buffering=0) as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError("The vector file must be a regular file")
+            stream.write(self._records(new))
+
+    def _save(self, known: dict[bytes, Any], new: dict[bytes, Any]) -> None:
+        """Persist new vectors, rewriting the file when it is unusable or mostly stale.
+
+        Best effort: vectors are only a cache, so a failed write leaves recall as is.
+        A rewrite costs the whole file, so under a deadline (the hook) only a missing
+        or unusable file is rewritten; stale records are compacted by the worker/CLI.
+        """
+        directory = self._cache_file.parent
+        try:
+            if directory.is_symlink():
+                raise ValueError("The vector directory must not be a symlink")
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _, stored = self._load_disk()
+            stale = len(stored) + len(new) - len(known)
+            if not self._disk_ok or (self.deadline is None and stale > len(known) + COMPACT_SLACK):
+                self._write_all(known)
+            elif new:
+                self._append(new)
+        except (OSError, ValueError):
+            pass
         self._disk = None
 
-    def vectors(self, texts: list[str], *, persist: bool = True) -> tuple[Any, int]:
+    def vectors(self, texts: list[str]) -> tuple[Any, int]:
         """Unit vectors for ``texts`` and how many had to be encoded now.
 
         Vectors come from this instance, then the vector file, and are encoded
-        otherwise. When anything was encoded and a cache directory is set, the file is
-        rewritten to hold exactly these texts, which drops vectors of removed claims.
+        otherwise; with a cache directory, newly encoded ones are saved. Past
+        ``max_new`` new texts, only that many are encoded and saved, and
+        EmbeddingTimeout is raised.
         """
         np = self._np
         digests = [hashlib.sha256(text.encode("utf-8")).digest() for text in texts]
@@ -285,24 +340,36 @@ class StaticEmbedder:
                 missing.setdefault(digest, []).append(row)
         if from_disk:
             rows, positions = zip(*from_disk)
-            matrix[list(rows)] = stored[list(positions)]
-        if missing:
-            encoded = self.encode([texts[rows[0]] for rows in missing.values()])
-            for vector, (digest, rows) in zip(encoded, missing.items()):
-                self._memory[digest] = vector
+            matrix[list(rows)] = stored["vector"][list(positions)]
+        todo = list(missing.items())
+        backlog = self.max_new is not None and len(todo) > self.max_new
+        if backlog:
+            todo = todo[: self.max_new]
+        new = {}
+        if todo:
+            encoded = self.encode([texts[rows[0]] for _, rows in todo])
+            for vector, (digest, rows) in zip(encoded, todo):
+                self._memory[digest] = new[digest] = vector
                 matrix[rows] = vector
-            # Past the deadline the vectors are still used; only the write is skipped.
-            late = self.deadline is not None and time.monotonic() > self.deadline
-            if persist and self._cache_file is not None and not late:
-                self._persist(digests, matrix)
-        return matrix, len(missing)
+        live = len(set(digests))
+        due = self.deadline is None and len(stored) - live > live + COMPACT_SLACK
+        if self._cache_file is not None and (new or due) and not self._late():
+            known = {d: matrix[row] for row, d in enumerate(digests) if d not in missing}
+            self._save({**known, **new}, new)
+        if backlog:
+            raise EmbeddingTimeout(f"{len(missing) - len(todo)} claims still need vectors")
+        return matrix, len(todo)
+
+    def _late(self) -> bool:
+        return self.deadline is not None and time.monotonic() > self.deadline
 
     def similarities(self, query: str, texts: list[str]) -> list[float]:
         """Cosine similarity of the query to each text, in input order."""
         if not texts:
             return []
+        query_vector = self.encode([query])[0]
         matrix, _ = self.vectors(texts)
-        return (matrix @ self.encode([query])[0]).tolist()
+        return (matrix @ query_vector).tolist()
 
 
 def from_env(
@@ -310,6 +377,7 @@ def from_env(
     local_only: bool = False,
     cache_dir: str | Path | None = None,
     deadline: float | None = None,
+    max_new: int | None = None,
 ) -> StaticEmbedder | None:
     """The embedder named by JEV_WIKI_EMBEDDING_MODEL, or None when unset or unavailable.
 
@@ -326,6 +394,7 @@ def from_env(
             local_only=local_only,
             cache_dir=cache_dir,
             deadline=deadline,
+            max_new=max_new,
         )
     except HookTimeout:
         raise  # The hook's own budget ran out: stop, do not continue lexically.

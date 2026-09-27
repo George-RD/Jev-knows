@@ -34,6 +34,9 @@ EVIDENCE_SUFFIX = "\n</untrusted_memory_evidence>"
 # may run until this long after the hook starts. Claim similarities come after the
 # store load and BM25, so this leaves the rest of the budget for packing the context.
 HOOK_EMBEDDING_SECONDS = 0.55
+# Claims a prompt may encode that the worker has not indexed (about 50 ms); a larger
+# backlog is worked off this many per prompt, with those prompts staying lexical.
+HOOK_MAX_NEW_CLAIMS = 512
 
 
 class HookTimeout(Exception):
@@ -175,20 +178,38 @@ def queue_event(
     return source_key
 
 
-def _hook_embedder(root: Path, started: float) -> Any:
-    """The configured embedder, if it loads from local files within the hook's budget.
+class _HookEmbedder:
+    """The configured embedder, loaded only once recall has claims to compare.
 
     Never downloads. Loading, and encoding claims the worker has not indexed yet, must
-    finish within HOOK_EMBEDDING_SECONDS of the hook starting; otherwise this recall
-    stays lexical. Vectors encoded here are persisted for the next prompt.
+    finish within HOOK_EMBEDDING_SECONDS of the hook starting, and at most
+    HOOK_MAX_NEW_CLAIMS claims are encoded (and saved for the next prompt) per prompt.
+    Otherwise this recall stays lexical.
     """
-    from .embedding import VECTOR_DIR, from_env
 
-    try:
-        cache_dir = _path(root, VECTOR_DIR)
-    except ValueError:
-        return None  # A symlinked vector directory: stay lexical rather than follow it.
-    return from_env(local_only=True, cache_dir=cache_dir, deadline=started + HOOK_EMBEDDING_SECONDS)
+    def __init__(self, root: Path, started: float):
+        self.root, self.started = root, started
+        self.embedder: Any = None
+
+    def similarities(self, query: str, texts: list[str]) -> list[float]:
+        if self.embedder is None:
+            from .embedding import VECTOR_DIR, from_env
+
+            self.embedder = from_env(
+                local_only=True,
+                cache_dir=_path(self.root, VECTOR_DIR),
+                deadline=self.started + HOOK_EMBEDDING_SECONDS,
+                max_new=HOOK_MAX_NEW_CLAIMS,
+            )
+            if self.embedder is None:
+                raise LookupError("No embedding model loaded within the hook's budget")
+        return self.embedder.similarities(query, texts)
+
+
+def _hook_embedder(root: Path, started: float) -> _HookEmbedder | None:
+    from .embedding import ENV_VAR
+
+    return _HookEmbedder(root, started) if os.environ.get(ENV_VAR, "").strip() else None
 
 
 def _evidence(context: str, max_chars: int) -> str:

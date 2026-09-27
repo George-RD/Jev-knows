@@ -172,7 +172,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             try:
                 _, encoded = embedder.vectors([c["text"] for c in engine.store.claims()])
                 result["embeddings"] = {"model": embedder.name, "encoded": encoded}
-            except (OSError, ValueError) as error:
+            except Exception as error:  # noqa: BLE001 - optional index; sources are already processed.
                 # Optional: the hook encodes what is missing or stays lexical.
                 result["embeddings"] = {"model": embedder.name, "error": type(error).__name__}
         return result

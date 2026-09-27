@@ -8,6 +8,7 @@ import struct
 import tempfile
 import time
 import unittest
+from contextlib import suppress
 from pathlib import Path
 from unittest import mock
 
@@ -122,34 +123,83 @@ class StaticEmbedderTests(unittest.TestCase):
             self.embedder().similarities("dinner basil", texts),
         )
 
-    def test_rewrite_keeps_only_current_claims_and_drops_other_models(self):
-        (self.cache).mkdir(parents=True)
-        stale = self.cache / "0123456789abcdef.vec"
-        stale.write_bytes(b"old model")
-        self.embedder().vectors(["basil", "report"])
-        self.embedder().vectors(["basil", "garden"])  # "report" was forgotten.
-        self.assertFalse(stale.exists())
+    def records(self) -> int:
         (vector_file,) = self.cache.glob("*.vec")
-        count = struct.unpack("<8s32sQQ", vector_file.read_bytes()[:56])[2]
-        self.assertEqual(count, 2)
-        _, encoded = self.embedder().vectors(["report"])
-        self.assertEqual(encoded, 1)
+        record = 32 + 4 * 4
+        size = vector_file.stat().st_size - embedding._HEADER.size
+        self.assertEqual(size % record, 0)
+        return size // record
 
-    def test_corrupt_or_foreign_vector_file_is_ignored(self):
+    def test_new_claims_are_appended_and_other_models_dropped(self):
+        self.cache.mkdir(parents=True)
+        other = self.cache / "0123456789abcdef.vec"
+        other.write_bytes(b"another model")
+        self.embedder().vectors(["basil", "report"])
+        self.assertFalse(other.exists())
+        self.embedder().vectors(["basil", "report", "garden"])
+        self.assertEqual(self.records(), 3)
+
+    def test_stale_records_are_compacted_without_a_deadline_only(self):
+        self.embedder().vectors(["basil", "report"])
+        with mock.patch.object(embedding, "COMPACT_SLACK", 0):
+            hook = self.embedder(deadline=time.monotonic() + 60)
+            hook.vectors(["garden"])  # "basil" and "report" were forgotten.
+            self.assertEqual(self.records(), 3)
+            _, encoded = self.embedder().vectors(["garden"])
+        self.assertEqual(encoded, 0)
+        self.assertEqual(self.records(), 1)
+
+    def test_torn_append_is_repaired_and_earlier_records_kept(self):
+        self.embedder().vectors(["basil", "report"])
+        (vector_file,) = self.cache.glob("*.vec")
+        with vector_file.open("ab") as stream:
+            stream.write(b"half a record")
+        embedder = self.embedder(deadline=time.monotonic() + 60)
+        vectors, encoded = embedder.vectors(["basil", "report", "garden"])
+        self.assertEqual(encoded, 1)
+        np.testing.assert_allclose(vectors[0], expected(self.model, "basil"), atol=1e-6)
+        self.assertEqual(self.records(), 3)
+
+    def test_foreign_vector_file_is_replaced(self):
         self.embedder().vectors(["basil"])
         (vector_file,) = self.cache.glob("*.vec")
-        vector_file.write_bytes(vector_file.read_bytes()[:-4])
+        vector_file.write_bytes(b"JEVVEC0\n" + vector_file.read_bytes()[8:])
         vectors, encoded = self.embedder().vectors(["basil"])
         self.assertEqual(encoded, 1)
         np.testing.assert_allclose(vectors[0], expected(self.model, "basil"), atol=1e-6)
+        self.assertEqual(self.embedder().vectors(["basil"])[1], 0)
 
-    def test_symlinked_vector_file_is_not_read(self):
+    def test_symlinked_vector_file_is_neither_read_nor_written(self):
         self.embedder().vectors(["basil"])
         (vector_file,) = self.cache.glob("*.vec")
         target = self.tmp / "elsewhere.vec"
         vector_file.rename(target)
         vector_file.symlink_to(target)
-        _, encoded = self.embedder().vectors(["basil"], persist=False)
+        before = target.read_bytes()
+        _, encoded = self.embedder(deadline=time.monotonic() + 60).vectors(["basil", "garden"])
+        self.assertEqual(encoded, 2)
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_unwritable_cache_keeps_the_computed_vectors(self):
+        self.cache.parent.mkdir(parents=True)
+        self.cache.write_text("a file, not a directory")
+        similarities = self.embedder().similarities("dinner", ["basil", "report"])
+        self.assertGreater(similarities[0], similarities[1])
+
+    def test_copies_of_one_model_share_vectors(self):
+        self.embedder().vectors(["basil"])
+        copy = write_model(self.tmp / "copy")
+        shared = embedding.StaticEmbedder(str(copy), cache_dir=self.cache)
+        self.assertEqual(shared.fingerprint, self.embedder().fingerprint)
+        self.assertEqual(shared.vectors(["basil"])[1], 0)
+
+    def test_encoding_cap_saves_part_of_a_backlog_per_call(self):
+        texts = ["basil", "report", "garden", "friday", "tomatoes"]
+        for done in (2, 4):
+            with self.assertRaises(embedding.EmbeddingTimeout):
+                self.embedder(max_new=2).vectors(texts)
+            self.assertEqual(self.records(), done)
+        _, encoded = self.embedder(max_new=2).vectors(texts)
         self.assertEqual(encoded, 1)
 
     def test_passed_deadline_stops_loading_and_encoding(self):
@@ -183,6 +233,19 @@ class StaticEmbedderTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 embedding.resolve_model("org/missing", local_only=True)
 
+    def test_hub_cache_follows_huggingface_hub_resolution(self):
+        cases = [
+            ({"HF_HUB_CACHE": "/a", "HF_HOME": "/b"}, Path("/a")),
+            ({"HUGGINGFACE_HUB_CACHE": "/c"}, Path("/c")),
+            ({"HF_HOME": "~/hf"}, Path("~/hf").expanduser() / "hub"),
+            ({"XDG_CACHE_HOME": "/x"}, Path("/x/huggingface/hub")),
+        ]
+        names = ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME")
+        for env, path in cases:
+            clean = {name: "" for name in names}
+            with self.subTest(env=env), mock.patch.dict(os.environ, {**clean, **env}):
+                self.assertEqual(embedding._hub_cache(), path)
+
 
 @unittest.skipIf(np is None, "the embed extra (numpy, tokenizers) is not installed")
 class HookEmbedderTests(unittest.TestCase):
@@ -196,20 +259,44 @@ class HookEmbedderTests(unittest.TestCase):
 
     def build(self, model: str, started: float | None = None):
         with mock.patch.dict(os.environ, {embedding.ENV_VAR: model}):
-            return hooks._hook_embedder(self.root, time.monotonic() if started is None else started)
+            lazy = hooks._hook_embedder(self.root, time.monotonic() if started is None else started)
+            if lazy is not None:
+                with suppress(LookupError):
+                    lazy.similarities("dinner", ["basil"])
+            return lazy
 
-    def test_local_model_loads_with_the_hook_deadline_and_vector_dir(self):
-        embedder = self.build(str(self.model))
-        self.assertIsNotNone(embedder)
+    def test_unset_model_means_no_hook_embedder(self):
+        self.assertIsNone(self.build(""))
+
+    def test_local_model_loads_with_the_hook_limits_and_vector_dir(self):
+        embedder = self.build(str(self.model)).embedder
         self.assertEqual(embedder._cache_file.parent, self.root / embedding.VECTOR_DIR)
         self.assertLessEqual(embedder.deadline, time.monotonic() + hooks.HOOK_EMBEDDING_SECONDS)
+        self.assertEqual(embedder.max_new, hooks.HOOK_MAX_NEW_CLAIMS)
+
+    def test_model_is_not_loaded_for_an_empty_memory(self):
+        project = self.tmp / "project"
+        project.mkdir()
+        payload = {
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "dinner ideas",
+            "session_id": "s1",
+            "cwd": str(project),
+        }
+        with (
+            mock.patch.dict(os.environ, {embedding.ENV_VAR: str(self.model)}),
+            mock.patch.object(embedding, "StaticEmbedder") as built,
+        ):
+            self.assertEqual(hooks.handle_hook(self.root, payload, project_root=project), {})
+        built.assert_not_called()
 
     def test_hook_never_downloads_and_falls_back_to_lexical(self):
         with mock.patch.dict(os.environ, {"HF_HUB_CACHE": str(self.tmp / "empty-hub")}):
-            self.assertIsNone(self.build("org/not-downloaded"))
+            self.assertIsNone(self.build("org/not-downloaded").embedder)
 
     def test_spent_budget_leaves_the_hook_lexical(self):
-        self.assertIsNone(self.build(str(self.model), started=time.monotonic() - 10))
+        lazy = self.build(str(self.model), started=time.monotonic() - 10)
+        self.assertIsNone(lazy.embedder)
 
     def test_hook_recall_uses_embeddings_end_to_end(self):
         from jev_wiki.engine import Engine

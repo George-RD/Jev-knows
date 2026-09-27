@@ -186,7 +186,7 @@ class FromEnvTests(unittest.TestCase):
         ):
             self.assertIsNone(embedding.from_env())
         failing.assert_called_once_with(
-            embedding.DEFAULT_MODEL, local_only=False, cache_dir=None, deadline=None
+            embedding.DEFAULT_MODEL, local_only=False, cache_dir=None, deadline=None, max_new=None
         )
 
 
