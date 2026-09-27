@@ -18,9 +18,9 @@ from pathlib import Path
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE_ROOT))
 
-from jev_wiki import __version__
-from jev_wiki.engine import RUBRIC_VERSION, Engine
-from jev_wiki.provider import JevProvider, ProviderError
+from jev_wiki import __version__  # noqa: E402 - needs the sys.path entry above
+from jev_wiki.engine import RUBRIC_VERSION, Engine  # noqa: E402 - needs the sys.path entry above
+from jev_wiki.provider import JevProvider, ProviderError  # noqa: E402 - needs the sys.path entry above
 
 
 class MeasuredJevProvider(JevProvider):

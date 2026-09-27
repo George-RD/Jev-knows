@@ -135,6 +135,19 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(retried["status"], "complete")
         self.assertEqual(len(self.engine.recall("Atlas", offline=True)["items"]), 1)
 
+    def test_pending_worker_rotates_past_persistently_deferred_sources(self):
+        from jev_wiki.cli import _process_pending
+
+        engine = Engine(self.root / "offline")
+        ids = [engine.store.capture(f"Note {i}.", f"note-{i}")["id"] for i in range(3)]
+        first = _process_pending(engine, limit=2)
+        second = _process_pending(engine, limit=2)
+        self.assertEqual(first["deferred"], 2)
+        tried_first = {result["source_id"] for result in first["results"]}
+        tried_second = {result["source_id"] for result in second["results"]}
+        self.assertEqual(len(tried_first), 2)
+        self.assertEqual(set(ids) - tried_first, tried_second - tried_first)
+
     def test_failure_in_later_batch_does_not_publish_partial_claims(self):
         self.engine.provider = LifecycleDecisionFixture(fail_at=2)
         text = "\n\n".join(f"Project Atlas component {number} is reserved." for number in range(5))

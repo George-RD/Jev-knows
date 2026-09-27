@@ -7,6 +7,7 @@ import heapq
 import json
 import math
 import re
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +54,7 @@ def _confidence(answer: dict) -> float:
     value = answer.get("confidence")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0.0
-    return float(value) if math.isfinite(value) and 0 <= value <= 1 else 0.0
+    return float(value) if 0 <= value <= 1 and math.isfinite(value) else 0.0
 
 
 def _tokens(text: str) -> set[str]:
@@ -82,6 +83,37 @@ def candidate_spans(text: str, max_chars: int = 1600) -> list[dict]:
     return spans
 
 
+def _processing_batches(spans: list[dict], role: str) -> Iterator[tuple[int, list[dict], str]]:
+    """Keep at most four candidates and leave room for a question on the wire.
+
+    State is itself JSON inside the request's JSON string. Account for both
+    escaping passes; raw UTF-8 length alone undercounts control characters.
+    The adapter still checks the complete state/question and request budgets.
+    """
+    offset = 0
+    while offset < len(spans):
+        chunk: list[dict] = []
+        state = ""
+        for span in spans[offset : offset + 4]:
+            proposed = json.dumps(
+                {
+                    "role": role,
+                    "candidates": {
+                        str(offset + i): s["text"] for i, s in enumerate([*chunk, span])
+                    },
+                },
+                ensure_ascii=False,
+            )
+            if len(json.dumps(proposed, ensure_ascii=False).encode("utf-8")) > 24_000:
+                if not chunk:
+                    raise ProviderError("Source candidate exceeds the processing-state budget")
+                break
+            chunk.append(span)
+            state = proposed
+        yield offset, chunk, state
+        offset += len(chunk)
+
+
 class Engine:
     """Single-user, explicitly scoped memory; provider=None never uses the network."""
 
@@ -108,8 +140,8 @@ class Engine:
             elif question["type"] == "score" and (
                 isinstance(value, bool)
                 or not isinstance(value, (int, float))
-                or not math.isfinite(value)
                 or not 0 <= value <= len(question["levels"]) - 1
+                or not math.isfinite(value)
             ):
                 raise ProviderError("invalid relevance score")
         return answers
@@ -131,27 +163,14 @@ class Engine:
         source = sources[source_id]
         if source.get("processing") == "complete":
             return {"source_id": source_id, "status": "complete", "idempotent": True}
-        if self.provider is None:
-            self.store.set_processing(source_id, "deferred", "provider_not_configured")
-            self.store.render()
-            return {
-                "source_id": source_id,
-                "status": "deferred",
-                "reason": "provider_not_configured",
-            }
-        spans = candidate_spans(self.store.read_source(source_id))
         claims = []
         try:
+            if self.provider is None:
+                return self._defer(source_id, "provider_not_configured", render=True)
+            spans = candidate_spans(self.store.read_source(source_id))
+            role = source.get("metadata", {}).get("role", "document")
             # Shared state is small and relevant; independent questions fan out within a batch.
-            for offset in range(0, len(spans), 4):
-                chunk = spans[offset : offset + 4]
-                state = json.dumps(
-                    {
-                        "role": source.get("metadata", {}).get("role", "document"),
-                        "candidates": {str(offset + i): s["text"] for i, s in enumerate(chunk)},
-                    },
-                    ensure_ascii=False,
-                )
+            for offset, chunk, state in _processing_batches(spans, role):
                 questions = {}
                 for i, span in enumerate(chunk, offset):
                     prefix = (
@@ -218,15 +237,7 @@ class Engine:
                 return {"source_id": source_id, "status": status, "idempotent": True}
             self.store.render()
         except ProviderError as exc:
-            if not self.store.is_current(source_id):
-                return {"source_id": source_id, "status": "cancelled", "reason": "source_changed"}
-            self.store.set_processing(source_id, "deferred", type(exc).__name__)
-            latest = next((s for s in self.store.sources() if s["id"] == source_id), None)
-            if latest is None:
-                return {"source_id": source_id, "status": "cancelled", "reason": "source_changed"}
-            if latest.get("processing") == "complete":
-                return {"source_id": source_id, "status": "complete", "idempotent": True}
-            return {"source_id": source_id, "status": "deferred", "reason": type(exc).__name__}
+            return self._defer(source_id, type(exc).__name__)
         except ValueError:
             if not self.store.is_current(source_id):
                 return {"source_id": source_id, "status": "cancelled", "reason": "source_changed"}
@@ -239,9 +250,33 @@ class Engine:
             "review": sum(c["status"] == "review" for c in claims),
         }
 
+    def _defer(self, source_id: str, reason: str, *, render: bool = False) -> dict:
+        """Do not turn concurrent completion or retraction into a failed worker."""
+        try:
+            self.store.set_processing(source_id, "deferred", reason)
+        except ValueError:
+            if self.store.is_current(source_id):
+                raise
+            return {"source_id": source_id, "status": "cancelled", "reason": "source_changed"}
+        latest = next((s for s in self.store.sources() if s["id"] == source_id), None)
+        if latest is None:
+            return {"source_id": source_id, "status": "cancelled", "reason": "source_changed"}
+        if latest.get("processing") == "complete":
+            return {"source_id": source_id, "status": "complete", "idempotent": True}
+        if render:
+            self.store.render()
+        return {"source_id": source_id, "status": "deferred", "reason": reason}
+
     def recall(
-        self, query: str, limit: int = 5, max_chars: int = 6000, offline: bool = False
+        self,
+        query: str,
+        limit: int = 5,
+        max_chars: int = 6000,
+        offline: bool = False,
+        *,
+        context_cost: Callable[[str], int] = len,
     ) -> dict:
+        """Pack whole evidence blocks using the caller's trusted output-size measure."""
         if not isinstance(query, str) or not query.strip() or len(query) > 2000:
             raise ValueError("query must contain 1–2000 characters")
         if not 1 <= limit <= 20 or not 256 <= max_chars <= 20_000:
@@ -295,8 +330,8 @@ class Engine:
                     if (
                         isinstance(score, bool)
                         or not isinstance(score, (int, float))
-                        or not math.isfinite(score)
                         or not 0 <= score <= 3
+                        or not math.isfinite(score)
                     ):
                         raise ProviderError("invalid relevance score")
                     claim["relevance"] = score
@@ -330,7 +365,7 @@ class Engine:
                 + json.dumps(claim["text"], ensure_ascii=False)
                 + "\n"
             )
-            if len(context) + len(block) > max_chars:
+            if context_cost(context + block) > max_chars:
                 continue  # Never truncate a quote into a misleading partial assertion.
             context += block
             items.append(

@@ -115,8 +115,10 @@ python3 examples/demo.py --root /tmp/jev-wiki-demo
 The demo uses visibly scripted decisions to exercise conflicts, source replacement,
 forgetting, citations and reconstruction. It is not a JEV benchmark.
 
-[Build validation](docs/validation.md): 86 tests passed, plus lint, formatting,
-editable installation and the executable demo.
+[Build validation](docs/validation.md): the PR #1 review passes 106 tests,
+editable installation and the executable demo. The original 86-test build also
+passed Ruff; Ruff was not available for the review. See the
+[review findings](docs/pr-1-review.md) for fixes and remaining live checks.
 
 [The live evaluation](docs/evaluation.md) compares lexical recall with JEV reranking
 over a small synthetic corpus, with held-out queries and token/latency reporting.
