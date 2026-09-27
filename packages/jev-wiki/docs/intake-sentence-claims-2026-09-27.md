@@ -20,7 +20,10 @@ from JEV averages, as the harness does).
 
 ## Results (recall_any@10 over sessions, `wiki_lexical` unless noted)
 
-BM25 over raw user turns scores 0.93 on these questions.
+BM25 over raw user turns scores 0.93 on these questions. The 30-question "before" column matches
+the full 346-question baseline in [longmemeval-2026-09-27.md](longmemeval-2026-09-27.md)
+(shipped 0.01, keep top choice 0.59, every stored claim 0.88). The sweep ran before
+the TypeSafe account ran out of credits.
 
 | Acceptance policy | Before (paragraphs, v1 wording) | Sentences only (v1 wording) | After (`wiki-v2`) |
 | --- | --- | --- | --- |
