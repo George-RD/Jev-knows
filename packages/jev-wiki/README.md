@@ -129,8 +129,9 @@ measured during this implementation because a key was unavailable.
 
 This initial implementation targets small, single-user wikis. Lexical shortlisting
 can miss synonyms before JEV sees a candidate. Maintenance checks a bounded selection
-of pairs, not every possible contradiction. Long paragraphs can contain several
-assertions; they remain quoted together. There is no generative summarizer, automatic
+of pairs, not every possible contradiction. Claims are source sentences: a sentence
+holding several assertions stays quoted whole, and sentence splitting is a heuristic
+(abbreviations it does not know can split a sentence early). There is no generative summarizer, automatic
 entity graph, embeddings, distributed service, or Cognee benchmark parity claim.
 
 Sources are limited to 200 KB per ingest, query length to 2,000 characters, and

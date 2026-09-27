@@ -150,7 +150,7 @@ class LifecycleTests(unittest.TestCase):
 
     def test_failure_in_later_batch_does_not_publish_partial_claims(self):
         self.engine.provider = LifecycleDecisionFixture(fail_at=2)
-        text = "\n\n".join(f"Project Atlas component {number} is reserved." for number in range(5))
+        text = "\n\n".join(f"Project Atlas component {number} is reserved." for number in range(9))
         result = self.ingest(text)
         self.assertEqual(result["status"], "deferred")
         self.assertEqual(self.engine.recall("Atlas", offline=True)["items"], [])

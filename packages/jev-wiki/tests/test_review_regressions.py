@@ -37,9 +37,10 @@ class ReviewRegressionTests(unittest.TestCase):
         project = self.directory / "project"
         project.mkdir()
         root = project / ".memory"
+        # One sentence near the candidate size limit: a whole claim, not a fragment.
         text = (
-            "Orion uses SQLite. " + "Preserve the complete decision and its scope. " * 30
-        ).strip()
+            "Orion uses SQLite, " + "preserving the complete decision and its scope, " * 11
+        ) + "in every release."
         engine = Engine(root, _DecisionFixture())
         engine.ingest(text, "orion-decision")
         result = handle_hook(
@@ -186,15 +187,19 @@ class ReviewRegressionTests(unittest.TestCase):
         project.mkdir()
         root = project / ".memory"
         engine = Engine(root, _DecisionFixture())
-        large = "Orion " + "&" * 1400
+        # Each large claim escapes to about 3000 characters: both cannot fit.
+        large = ["Orion " + "&" * 590, "Orion also " + "&" * 585]
         small = "Orion uses <SQLite> & keeps a cited audit trail."
-        engine.ingest(large, "escaped-too-large")
+        engine.ingest(large[0], "escaped-large-one")
+        engine.ingest(large[1], "escaped-large-two")
         engine.ingest(small, "escaped-fits")
         result = handle_hook(root, self.payload(project, "Orion?"), project_root=project)
         context = result["hookSpecificOutput"]["additionalContext"]
         self.assertIn(html.escape(small, quote=False), context)
-        self.assertNotIn(html.escape(large, quote=False), context)
-        self.assertEqual(context.count("#chars="), 1)
+        included = sum(html.escape(text, quote=False) in context for text in large)
+        self.assertEqual(included, 1)
+        # Every citation carries its complete quote; nothing was truncated to fit.
+        self.assertEqual(context.count("#chars="), 2)
         self.assertEqual(context.count("</untrusted_memory_evidence>"), 1)
         self.assertLessEqual(len(context), 6000)
 
@@ -337,7 +342,8 @@ class ReviewRegressionTests(unittest.TestCase):
         engine = Engine(self.directory / "memory", provider)
         text = "\n\n".join(f"Paragraph {i}: " + "\x01" * 1400 for i in range(9))
         result = engine.ingest(text, "escaped-source")
-        self.assertEqual(result["claims"], 9)
+        # Each 1400-character paragraph is cut into three bounded candidates.
+        self.assertEqual(result["claims"], 27)
         observed = []
         for state, questions in provider.calls:
             indices = list(json.loads(state)["candidates"])
@@ -346,7 +352,7 @@ class ReviewRegressionTests(unittest.TestCase):
                 set(questions),
                 {f"{kind}_{i}" for i in indices for kind in ("keep", "kind", "topic")},
             )
-        self.assertEqual(observed, [str(i) for i in range(9)])
+        self.assertEqual(observed, [str(i) for i in range(27)])
         for claim in engine.store.claims():
             self.assertEqual(claim["text"], text[claim["start"] : claim["end"]])
         self.assertEqual(engine.store.lint(), [])

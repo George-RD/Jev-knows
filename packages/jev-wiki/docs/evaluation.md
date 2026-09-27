@@ -84,3 +84,4 @@ answer generation, real user histories, harness injection, sustained concurrency
 or long-term forgetting. Those need separately labelled, representative datasets.
 
 First live results: [live-evaluation-2026-09-27.md](live-evaluation-2026-09-27.md).
+LongMemEval intake results: [intake-sentence-claims-2026-09-27.md](intake-sentence-claims-2026-09-27.md).

@@ -14,8 +14,9 @@ and software tests are not evidence of semantic performance.
 
 1. If relevant sources miss the lexical shortlist, add a bounded candidate-expansion
    step (JEV topic routing or optional embeddings), then compare against the same queries.
-2. If paragraph spans mix useful facts and transient instructions, introduce
-   sentence/clause candidates with surrounding source context and exact offsets.
+2. Done in rubric `wiki-v2`: sentence candidates with neighbouring context and exact
+   offsets, plus keep wording that values personal facts. See
+   [intake-sentence-claims-2026-09-27.md](intake-sentence-claims-2026-09-27.md).
 3. If richer narrative pages materially help recall, add an optional writer that
    proposes cited prose. Validate each supporting span; synthesized answers must
    never become independent corroborating sources.

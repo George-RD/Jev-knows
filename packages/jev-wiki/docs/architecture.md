@@ -21,7 +21,7 @@ Our choices are:
 
 - Keep the first installation local and inspectable: immutable raw revisions,
   canonical JSON state, generated Markdown and lexical candidate search in memory.
-- Select and classify source paragraphs instead of asking JEV to invent claims,
+- Select and classify source sentences instead of asking JEV to invent claims,
   names or prose. Copy accepted text directly from source evidence.
 - Use the same narrow provider contract for filtering, ranking and pair
   relationships: `Provider.ask(state, questions) -> answers`.
@@ -62,8 +62,10 @@ forget(source_key)
 
 `ingest` captures evidence and calls `process`; without a provider it records deferred
 work. Hooks have a separate inbox so their capture path does not perform remote
-processing. `process` constructs paragraph candidates and asks bounded questions
-about their usefulness and classification. Code applies
+processing. `process` cuts each paragraph into sentence candidates (fragments under
+25 characters join a neighbour) and asks bounded questions about their usefulness
+and classification, sending up to eight neighbouring sentences as shared context.
+Whole-paragraph judgments discarded personal facts buried in chatty requests. Code applies
 validated decisions and renders the resulting pages. A provider failure must leave
 raw evidence available and work recoverable; it must not create successful-looking
 model output.
@@ -93,7 +95,7 @@ over supplied candidates. They do not provide arbitrary free-text generation.
 
 | Stage | JEV judgment | Code responsibility |
 | --- | --- | --- |
-| Processing | Is this paragraph durable and useful? Which known category fits? | Paragraph boundaries, IDs, exact text and citations |
+| Processing | Would an assistant want to remember this sentence later? Which known category fits? | Sentence boundaries, IDs, exact text and citations |
 | Recall | Does each shortlisted memory help answer this query? | Candidate generation, ordering policy and output budget |
 | Maintenance | How are these two passages related? | Lexical pair priority, pair budget, lifecycle rules and preservation of evidence |
 | Failure handling | None | Timeouts, errors, retries, local fallback and honest status |
