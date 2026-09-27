@@ -115,6 +115,16 @@ class StoreTests(unittest.TestCase):
         self.store.set_processing(source["id"], "complete")
         self.assertNotIn("processing_error", self.store.sources()[0])
 
+    def test_repeated_deferral_does_not_grow_the_event_log(self):
+        source = self.store.capture("Deferred text.", "deferred")
+        self.store.set_processing(source["id"], "deferred", "provider_not_configured")
+        state_path = self.root / "state.json"
+        events = len(json.loads(state_path.read_text())["events"])
+        for _ in range(5):
+            self.store.set_processing(source["id"], "deferred", "provider_not_configured")
+        self.assertEqual(len(json.loads(state_path.read_text())["events"]), events)
+        self.assertIn("processing_attempted_at", self.store.sources()[0])
+
     def test_forget_tombstones_all_revisions_and_regenerates_pages(self):
         old, _ = self.capture_claim("A forgotten preference.")
         newer = self.store.capture("A newer forgotten preference.", "profile")
