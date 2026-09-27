@@ -222,8 +222,8 @@ def _order(c: dict) -> tuple:
 def _candidates(claims: list[dict], scores, lifted, similarities=None) -> list[dict]:
     """Recall candidates: every lexical match, plus the most query-similar claims.
 
-    ``similarities`` (one per claim, or None without an embedder) adds up to
-    SHORTLIST_SIZE claims at or above MIN_SIMILARITY, matched or not, and gives each
+    ``similarities`` (one per claim, or None without an embedder) adds every claim at
+    or above MIN_SIMILARITY, matched or not, and gives each
     candidate a ``fused_score`` from its lexical (context order) and semantic ranks.
     """
     candidates = [
@@ -243,7 +243,8 @@ def _candidates(claims: list[dict], scores, lifted, similarities=None) -> list[d
     for weight, ranked in ((1.0, lexical), (SEMANTIC_WEIGHT, semantic)):
         for rank, c in enumerate(ranked):
             fused[c["id"]] = fused.get(c["id"], 0.0) + weight / (FUSION_K + rank + 1)
-    kept = {c["id"]: c for c in (*lexical, *semantic[:SHORTLIST_SIZE])}
+    # Every similar claim stays, so _shortlist can backfill past ones too large to fit.
+    kept = {c["id"]: c for c in (*lexical, *semantic)}
     return [{**c, "fused_score": fused[i]} for i, c in kept.items()]
 
 

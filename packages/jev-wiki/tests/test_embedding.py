@@ -125,6 +125,16 @@ class EmbeddingShortlistTests(unittest.TestCase):
         self.assertLessEqual(cost, SHORTLIST_BYTES)
         self.assertEqual(len(picked), SHORTLIST_BYTES // 1_100)
 
+    def test_small_similar_claims_backfill_past_oversized_ones(self):
+        big = self.claims(SHORTLIST_SIZE, "b", size=3_000)
+        small = self.claims(10, "s")
+        claims = [*big, *small]
+        similarities = [0.9] * len(big) + [0.5] * len(small)
+        picked = {
+            c["id"] for c in _shortlist(_candidates(claims, [0.0] * 34, [0.0] * 34, similarities))
+        }
+        self.assertTrue({c["id"] for c in small} <= picked)
+
     def test_without_similarities_candidates_are_the_lexical_matches(self):
         claims = self.claims(3, "c")
         candidates = _candidates(claims, [1.0, 0.0, 2.0], [1.0, 0.0, 2.0])
