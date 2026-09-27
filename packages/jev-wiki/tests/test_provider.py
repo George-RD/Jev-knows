@@ -187,6 +187,43 @@ class ProviderTests(unittest.TestCase):
         provider = JevProvider("key", transport=RecordingTransport([mutate]))
         self.assertEqual(provider.ask("source", {"q": question})["q"]["value"], "l0")
 
+    def test_rounded_near_tie_choice_is_accepted_but_a_clear_loser_is_not(self):
+        # Observed live: keep/review/discard answered "review" at 0.47 against 0.48.
+        question = {"type": "choice", "prompt": "Pick one.", "choices": {"a": "A", "b": "B"}}
+
+        def answer(probabilities):
+            return lambda body: body["answers"]["q"].update(choice="a", probabilities=probabilities)
+
+        tie = JevProvider("key", transport=RecordingTransport([answer({"a": 0.49, "b": 0.5})]))
+        self.assertEqual(tie.ask("source", {"q": question})["q"]["value"], "a")
+        loser = JevProvider("key", transport=RecordingTransport([answer({"a": 0.4, "b": 0.6})]))
+        with self.assertRaises(ProviderError):
+            loser.ask("source", {"q": question})
+
+    def test_score_accepts_rounding_but_respects_unit_sum(self):
+        def ask(levels, probabilities, score):
+            question = {"type": "score", "prompt": "Rate", "levels": levels}
+
+            def mutate(body):
+                body["answers"]["q"].update(
+                    score=score,
+                    legend={str(i): level for i, level in enumerate(levels)},
+                    probabilities={str(i): p for i, p in enumerate(probabilities)},
+                )
+
+            provider = JevProvider("key", transport=RecordingTransport([mutate]))
+            return provider.ask("s", {"q": question})["q"]["value"]
+
+        four = ["Unrelated", "Tangential", "Useful", "Direct"]
+        # Unrounded 0.004/0.004/0.0149/0.9771 has expectation 2.965; rounded, 2.96.
+        self.assertEqual(ask(four, [0.0, 0.0, 0.01, 0.99], 2.97), 2.97)
+        with self.assertRaises(ProviderError):
+            ask(four, [0.0, 0.0, 0.01, 0.99], 2.5)
+        # All mass displayed at level 0 cannot have an expectation of 0.23.
+        ten = [f"Level {i}" for i in range(10)]
+        with self.assertRaises(ProviderError):
+            ask(ten, [1.0] + [0.0] * 9, 0.23)
+
     def test_noul_probability_not_boolean_and_invalid_score_rejected(self):
         mutations_and_questions = [
             (

@@ -133,6 +133,29 @@ def _wire_questions(questions: dict[str, dict]) -> dict[str, dict]:
     return result
 
 
+def _expectation_bounds(rounded: list[float]) -> tuple[float, float]:
+    """Range of sum(i * p_i) over unit-sum distributions that round to ``rounded``.
+
+    Each displayed probability stands for an interval of half a hundredth either
+    side (clipped to [0, 1]). The extremes put the free mass on the highest or
+    lowest levels first.
+    """
+    lows = [max(0.0, p - 0.005) for p in rounded]
+    highs = [min(1.0, p + 0.005) for p in rounded]
+
+    def extreme(order: list[int]) -> float:
+        mass = [*lows]
+        free = 1.0 - sum(lows)
+        for i in order:
+            add = min(max(free, 0.0), highs[i] - lows[i])
+            mass[i] += add
+            free -= add
+        return sum(i * m for i, m in enumerate(mass))
+
+    levels = list(range(len(rounded)))
+    return extreme(levels), extreme(levels[::-1])
+
+
 def _validated_answers(raw: object, questions: dict[str, dict], model: str) -> dict[str, dict]:
     if not isinstance(raw, dict) or not isinstance(raw.get("model"), str):
         raise ProviderError("JEV response is missing its model")
@@ -182,15 +205,17 @@ def _validated_answers(raw: object, questions: dict[str, dict], model: str) -> d
             value = answer.get("choice")
             if not isinstance(value, str) or value not in expected:
                 raise ProviderError("JEV response selected an unknown choice")
-            if probabilities[value] + 0.005 < max(probabilities.values()):
+            # Rounding can put a near-tie winner up to a hundredth below the runner-up.
+            if probabilities[value] + 0.01 + 1e-9 < max(probabilities.values()):
                 raise ProviderError("JEV response choice is not the highest-probability option")
         else:
             value = _number(answer.get("score"), 0, len(expected) - 1, "score")
             legend = answer.get("legend")
             if legend != {str(i): level for i, level in enumerate(question["criteria"])}:
                 raise ProviderError("JEV response score legend does not match the criteria")
-            expectation = sum(int(key) * probability for key, probability in probabilities.items())
-            if not math.isclose(value, expectation, abs_tol=0.025):
+            low, high = _expectation_bounds([probabilities[str(i)] for i in range(len(expected))])
+            # The score is itself rounded, so allow one hundredth beyond the bounds.
+            if not low - 0.01 - 1e-9 <= value <= high + 0.01 + 1e-9:
                 raise ProviderError(
                     "JEV response score does not match its probability distribution"
                 )
