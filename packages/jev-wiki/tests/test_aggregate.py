@@ -181,5 +181,39 @@ class AggregateRecallTests(unittest.TestCase):
                 self.engine.recall("How many runs?", offline=True, aggregate_limit=value)
 
 
+class CliAggregateDefaultTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="jev-wiki-aggregate-cli-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        runs = [f"I did charity fun run {i}." for i in range(80)]
+        Engine(self.root, LifecycleDecisionFixture()).ingest("\n\n".join(runs), source_key="runs")
+
+    def recall(self, *extra):
+        from jev_wiki.cli import DEFAULT_AGGREGATE_LIMIT, _parser, run
+
+        self.assertEqual(DEFAULT_AGGREGATE_LIMIT, 60)
+        base = ["--root", str(self.root), "--provider", "none", "recall"]
+        return run(_parser().parse_args([*base, *extra]))
+
+    def test_cli_recall_aggregates_counting_questions_by_default(self):
+        result = self.recall("How many charity fun runs did I do?", "--offline")
+        self.assertTrue(result["aggregate"])
+        self.assertGreater(len(result["items"]), 5)
+        self.assertLessEqual(len(result["context"]), 6_000)  # --max-chars still bounds it
+
+    def test_zero_turns_it_off(self):
+        result = self.recall(
+            "How many charity fun runs did I do?", "--offline", "--aggregate-limit", "0"
+        )
+        self.assertFalse(result["aggregate"])
+        self.assertEqual(len(result["items"]), 5)
+
+    def test_other_questions_keep_the_plain_limit(self):
+        result = self.recall("Tell me about my charity fun run", "--offline")
+        self.assertFalse(result["aggregate"])
+        self.assertEqual(len(result["items"]), 5)
+
+
 if __name__ == "__main__":
     unittest.main()
