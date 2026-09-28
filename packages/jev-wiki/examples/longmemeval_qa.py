@@ -35,6 +35,7 @@ runs of this harness with each other using the same models.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import random
@@ -42,7 +43,6 @@ import statistics
 import sys
 import tempfile
 import time
-import urllib.error
 import urllib.request
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
@@ -109,6 +109,9 @@ JUDGE_PROMPTS = {
 
 _CONFIG: dict = {}
 ATTEMPTS = 7
+# URLError and timeouts are OSErrors; dropped connections and cut-off bodies are too, or
+# HTTPExceptions. One of them must cost a row, never the run.
+_CALL_ERRORS = (OSError, http.client.HTTPException, KeyError, json.JSONDecodeError)
 
 
 def chat(model: str, prompt: str) -> str:
@@ -129,7 +132,7 @@ def chat(model: str, prompt: str) -> str:
         try:
             with urllib.request.urlopen(request, timeout=300) as response:
                 return json.load(response)["message"]["content"].strip()
-        except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
+        except _CALL_ERRORS as exc:
             status = getattr(exc, "code", None)
             if attempt == ATTEMPTS - 1 or (status is not None and status < 500 and status != 429):
                 raise
@@ -218,7 +221,7 @@ def run_question(item: dict) -> dict:
         )
         row["judge_raw"] = verdict[:200]
         row["correct"] = "yes" in verdict.lower()
-    except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
+    except _CALL_ERRORS as exc:
         row["error"] = f"{type(exc).__name__}: {exc}"[:300]
     return row
 
@@ -281,8 +284,9 @@ def main() -> int:
     done = {}
     if args.resume:
         earlier = json.loads(Path(args.resume).read_text())
-        if {k: earlier["config"].get(k) for k in config} != config:
-            parser.error("--resume report was made with a different mode or models")
+        resumed = {**config, "embedding_model": os.environ.get("JEV_WIKI_EMBEDDING_MODEL")}
+        if {k: earlier["config"].get(k) for k in resumed} != resumed:
+            parser.error("--resume report was made with a different mode, models or embedder")
         done = {r["question_id"]: r for r in earlier["rows"] if "correct" in r}
     todo = [item for item in items if item["question_id"] not in done]
     started = time.perf_counter()
