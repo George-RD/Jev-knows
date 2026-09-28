@@ -66,6 +66,7 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 
 from jev_wiki import __version__  # noqa: E402
 from jev_wiki.bm25 import bm25_scores  # noqa: E402
+from jev_wiki.embedding import DEFAULT_MODEL, ENV_VAR  # noqa: E402
 from jev_wiki.engine import (  # noqa: E402
     KIND_CONFIDENCE,
     RUBRIC_VERSION,
@@ -211,7 +212,28 @@ def session_text(session: list[dict]) -> str:
     return "\n\n".join(t["content"].strip() for t in session if t["role"] == "user").strip()
 
 
-def run_question(item: dict, model: str, cache_dir: str | None = None) -> dict:
+# One embedder per worker process, loaded on its first question.
+_EMBEDDERS: dict[str, object] = {}
+
+
+def embedder_for(name: str | None):
+    """The engine's optional embedder for ``name`` (``default`` = DEFAULT_MODEL), or None.
+
+    Unlike ``embedding.from_env`` a model that fails to load raises, so a sweep meant to
+    measure embedding candidates cannot silently score lexical recall instead.
+    """
+    if not name:
+        return None
+    if name not in _EMBEDDERS:
+        from jev_wiki.embedding import StaticEmbedder
+
+        _EMBEDDERS[name] = StaticEmbedder(DEFAULT_MODEL if name == "default" else name)
+    return _EMBEDDERS[name]
+
+
+def run_question(
+    item: dict, model: str, cache_dir: str | None = None, embedding_model: str | None = None
+) -> dict:
     started = time.perf_counter()
     expected_ids = set(item["answer_session_ids"])
     keys, texts, expected = [], [], set()
@@ -243,7 +265,7 @@ def run_question(item: dict, model: str, cache_dir: str | None = None) -> dict:
     )
     provider = JevProvider(model=model, cache_dir=cache_dir)
     with tempfile.TemporaryDirectory(prefix="jev-lme-") as root:
-        engine = Engine(root, provider)
+        engine = Engine(root, provider, embedder=embedder_for(embedding_model))
         statuses = Counter()
         candidates = 0
         for key, text in zip(keys, texts):
@@ -408,6 +430,12 @@ def main() -> int:
     parser.add_argument("--model", default="jev-1.13.0")
     parser.add_argument("--output", required=True)
     parser.add_argument(
+        "--embedding-model",
+        default=os.environ.get(ENV_VAR, "").strip() or None,
+        help=f"Give the engine the optional embedding candidates (needs the embed extra); "
+        f"'default' is {DEFAULT_MODEL}. Defaults to ${ENV_VAR}; unset keeps recall lexical",
+    )
+    parser.add_argument(
         "--cache-dir",
         type=Path,
         default=default_cache_dir(),
@@ -431,6 +459,10 @@ def main() -> int:
     except ProviderError as error:
         print(json.dumps({"status": "refused", "reason": str(error)}))
         return 2
+    embedding_model = None
+    if args.embedding_model:
+        # Load once here so a missing extra or model fails before any paid request.
+        embedding_model = embedder_for(args.embedding_model).name
     data = json.loads(Path(args.data).read_text(encoding="utf-8"))
     chosen = select(data, args.per_type, args.seed, args.include_abstention)
     del data
@@ -443,7 +475,10 @@ def main() -> int:
     started = time.perf_counter()
     rows, failures = [], []
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(run_question, item, args.model, cache_dir): item for item in chosen}
+        futures = {
+            pool.submit(run_question, item, args.model, cache_dir, embedding_model): item
+            for item in chosen
+        }
         for future in as_completed(futures):
             qid = futures[future]["question_id"]
             try:
@@ -462,6 +497,7 @@ def main() -> int:
         "jev_wiki_version": __version__,
         "rubric_version": RUBRIC_VERSION,
         "requested_model": args.model,
+        "embedding_model": embedding_model,
         "observed_models": sorted({r["observed_model"] for r in rows if r["observed_model"]}),
         "selection": {
             "per_type": args.per_type,
