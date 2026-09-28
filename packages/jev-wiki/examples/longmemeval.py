@@ -32,12 +32,25 @@ https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned first):
 
     python packages/jev-wiki/examples/longmemeval.py --data longmemeval_s_cleaned.json \
         --per-type 5 --output /tmp/lme-report.json
+
+JEV responses are cached on disk, one file per request, keyed on the endpoint, pinned model and exact request, so a repeat run only pays for
+requests it has not sent before. A changed prompt, rubric, source text or model is a
+different key. Model aliases (``jev-latest``) are never cached. A cached rerun replays
+the earlier answers; pass ``--no-cache`` to sample JEV afresh, or ``--clear-cache`` to
+start empty. The cache directory is ``--cache-dir``, else ``JEV_WIKI_CACHE_DIR``, else
+``/mnt/project-files/jev-cache/longmemeval`` when that shared folder exists (so every
+session reuses and extends one cache), else ``~/.cache/jev-wiki/longmemeval``.
+Concurrent writers are safe: entries are written atomically and a key's content is
+fixed, so the last writer wins harmlessly. ``--clear-cache`` on a shared folder
+empties it for everyone. The report's ``cache`` block counts hits, misses (paid requests) and the
+input tokens the hits saved.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import statistics
 import sys
@@ -54,12 +67,19 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 from jev_wiki import __version__  # noqa: E402
 from jev_wiki.bm25 import bm25_scores  # noqa: E402
 from jev_wiki.engine import (  # noqa: E402
+    KIND_CONFIDENCE,
     RUBRIC_VERSION,
     SHORTLIST_BYTES,
     SHORTLIST_SIZE,
     Engine,
+    definite_kind,
 )
-from jev_wiki.provider import JevProvider, ProviderError  # noqa: E402
+from jev_wiki.provider import (  # noqa: E402
+    JevProvider,
+    ProviderError,
+    cache_stats,
+    clear_cache,
+)
 
 KS = (1, 3, 5, 10)
 
@@ -102,11 +122,15 @@ def jev_rerank(provider: JevProvider, query: str, claims: list[dict]) -> list[di
 
 # Acceptance policies, from the shipped gate to everything JEV did not hard-discard.
 # A threshold t activates a stored claim when JEV's top keep choice is "keep" with
-# confidence >= t and its kind is not "uncertain" with confidence >= min(t, 0.70).
-# 0.82/0.70 reproduce the engine's gate, so "shipped" is the engine's own result.
+# confidence >= t and its kind is confidently not "uncertain" (definite_kind with floor
+# min(t, 0.70)). 0.82/0.70 reproduce the engine's gate, so "shipped" is the engine's own result.
 POLICIES = (
     ("shipped", None),
+    ("keep>=0.75", 0.75),
+    ("keep>=0.7", 0.7),
+    ("keep>=0.65", 0.65),
     ("keep>=0.6", 0.6),
+    ("keep>=0.5", 0.5),
     ("keep>=0.4", 0.4),
     ("keep>=0.2", 0.2),
     ("keep_top_choice", 0.0),
@@ -121,8 +145,7 @@ def admits(claim: dict, threshold: float | None) -> bool:
     return (
         keep["value"] == "keep"
         and (keep.get("confidence") or 0) >= threshold
-        and kind["value"] != "uncertain"
-        and (kind.get("confidence") or 0) >= min(threshold, 0.70)
+        and definite_kind(kind, min(threshold, KIND_CONFIDENCE))
     )
 
 
@@ -188,7 +211,7 @@ def session_text(session: list[dict]) -> str:
     return "\n\n".join(t["content"].strip() for t in session if t["role"] == "user").strip()
 
 
-def run_question(item: dict, model: str) -> dict:
+def run_question(item: dict, model: str, cache_dir: str | None = None) -> dict:
     started = time.perf_counter()
     expected_ids = set(item["answer_session_ids"])
     keys, texts, expected = [], [], set()
@@ -218,7 +241,7 @@ def run_question(item: dict, model: str) -> dict:
     row["bm25_sessions"] = score_sessions(
         [keys[i] for i in bm25_rank(item["question"], texts)], expected
     )
-    provider = JevProvider(model=model)
+    provider = JevProvider(model=model, cache_dir=cache_dir)
     with tempfile.TemporaryDirectory(prefix="jev-lme-") as root:
         engine = Engine(root, provider)
         statuses = Counter()
@@ -336,6 +359,35 @@ def summarize(rows: list[dict]) -> dict:
     }
 
 
+# Folder shared by every session of the Jev-Knows project; it outlives any one container.
+SHARED_FOLDER = Path("/mnt/project-files")
+
+
+def default_cache_dir() -> Path:
+    """``JEV_WIKI_CACHE_DIR``, else the shared project folder, else the user cache."""
+    if os.environ.get("JEV_WIKI_CACHE_DIR"):
+        return Path(os.environ["JEV_WIKI_CACHE_DIR"])
+    if SHARED_FOLDER.is_dir():
+        return SHARED_FOLDER / "jev-cache" / "longmemeval"
+    base = os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
+    return Path(base) / "jev-wiki" / "longmemeval"
+
+
+def cache_report(cache_dir: str | None, telemetry: Counter) -> dict:
+    """What the response cache saved; ``paid_batches`` are the requests JEV billed."""
+    report = {
+        "enabled": cache_dir is not None,
+        "hits": telemetry["cache_hits"],
+        "misses": telemetry["cache_misses"],
+        "errors": telemetry["cache_errors"],
+        "paid_input_tokens": telemetry["input_tokens"],
+        "saved_input_tokens": telemetry["cached_input_tokens"],
+    }
+    if cache_dir is not None:
+        report.update(cache_stats(cache_dir))
+    return report
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--data", required=True, help="longmemeval_s_cleaned.json")
@@ -347,10 +399,33 @@ def main() -> int:
         help="Also score _abs questions, as retrieval of their labelled related session; "
         "this does not measure abstention itself.",
     )
+    parser.add_argument(
+        "--types",
+        help="Comma-separated question types to keep from the seeded selection, so a cheap "
+        "subset reuses exactly the questions of the full sweep",
+    )
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--model", default="jev-1.13.0")
     parser.add_argument("--output", required=True)
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=default_cache_dir(),
+        help="JEV response cache shared across runs (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--no-cache", action="store_true", help="Send every request to JEV; read or write no cache"
+    )
+    parser.add_argument(
+        "--clear-cache", action="store_true", help="Empty the response cache before running"
+    )
     args = parser.parse_args()
+    # The provider never caches aliases, whose target version can change.
+    aliased = args.model in {"jev-latest", "jev-preview"}
+    cache_dir = None if args.no_cache or aliased else str(args.cache_dir)
+    if args.clear_cache:
+        removed = clear_cache(args.cache_dir)
+        print(f"cleared {removed} cached responses", file=sys.stderr, flush=True)
     try:
         JevProvider(model=args.model)
     except ProviderError as error:
@@ -359,10 +434,16 @@ def main() -> int:
     data = json.loads(Path(args.data).read_text(encoding="utf-8"))
     chosen = select(data, args.per_type, args.seed, args.include_abstention)
     del data
+    if args.types:
+        wanted = {t.strip() for t in args.types.split(",") if t.strip()}
+        unknown = wanted - {i["question_type"] for i in chosen}
+        if unknown:
+            parser.error(f"unknown question types: {', '.join(sorted(unknown))}")
+        chosen = [i for i in chosen if i["question_type"] in wanted]
     started = time.perf_counter()
     rows, failures = [], []
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(run_question, item, args.model): item for item in chosen}
+        futures = {pool.submit(run_question, item, args.model, cache_dir): item for item in chosen}
         for future in as_completed(futures):
             qid = futures[future]["question_id"]
             try:
@@ -386,17 +467,26 @@ def main() -> int:
             "per_type": args.per_type,
             "seed": args.seed,
             "include_abstention": args.include_abstention,
+            "types": sorted(wanted) if args.types else None,
             "question_ids": [i["question_id"] for i in chosen],
         },
         "wall_seconds": round(time.perf_counter() - started, 1),
         "telemetry": dict(telemetry),
+        "cache": cache_report(cache_dir, telemetry),
         "summary": summarize(rows),
         "failures": failures,
         "rows": rows,
     }
     Path(args.output).write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(
-        json.dumps({"overall": report["summary"]["overall"], "failures": len(failures)}, indent=2)
+        json.dumps(
+            {
+                "overall": report["summary"]["overall"],
+                "cache": report["cache"],
+                "failures": len(failures),
+            },
+            indent=2,
+        )
     )
     return 1 if failures else 0
 

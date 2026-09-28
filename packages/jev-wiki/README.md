@@ -53,6 +53,13 @@ reads the model memory-mapped (about 0.1 s), and reads claim vectors that `worke
 past 0.55 s of the hook's 0.75 s budget, that prompt's recall stays lexical. See
 [docs/hook-embeddings-2026-09-27.md](docs/hook-embeddings-2026-09-27.md).
 
+Questions that count, total, order or date events ("how many weddings did I go to",
+"which did I start first") need every mention, not the best few. `recall
+--aggregate-limit 60` lets such questions return up to 60 claims; the ranked shortlist
+comes first and the JEV request is unchanged. It is off by default. On LongMemEval it
+lifts answer accuracy from 0.754 to 0.778
+([aggregate recall](docs/aggregate-recall-2026-09-28.md)).
+
 Re-ingest a changed document with the **same source key** to replace its current
 revision. Independent sources need independent keys: capture order does not resolve
 their factual disagreements.
@@ -105,7 +112,9 @@ candidates only when a downloaded model loads within their budget.
 - `wiki/notes/`: a suggested home for handwritten notes. Ingest them explicitly under
   stable source keys to make them available to recall.
 - `AGENTS.md`: local wiki instructions created by `init`, without replacing existing instructions.
-- `inbox/`: durable hook events and receipts; `cache/jev/`: optional model response cache.
+- `inbox/`: durable hook events and receipts; `cache/jev/`: model response cache, keyed
+  on the pinned model and exact request so repeats cost nothing. `cache` shows its size
+  and `cache --clear` empties it.
 
 Rebuild pages without inference:
 
