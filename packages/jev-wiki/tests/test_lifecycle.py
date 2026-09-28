@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jev_wiki.engine import Engine, candidate_spans
+from jev_wiki.engine import Engine, candidate_spans, definite_kind
 from jev_wiki.provider import ProviderError
 
 
@@ -30,6 +30,7 @@ class LifecycleDecisionFixture:
         fail_at=None,
         malformed=None,
         before_answer=None,
+        kind_answer=None,
     ):
         self.keep = keep
         self.kind = kind
@@ -38,6 +39,8 @@ class LifecycleDecisionFixture:
         self.fail_at = fail_at
         self.malformed = malformed
         self.before_answer = before_answer
+        # A full kind answer (value, confidence, probabilities) in place of the default.
+        self.kind_answer = kind_answer
         self.calls = []
 
     def ask(self, state, questions):
@@ -65,6 +68,8 @@ class LifecycleDecisionFixture:
             else:
                 raise AssertionError(f"Unrecognized engine question: {name}")
             answers[name] = {"value": value, "confidence": self.confidence}
+            if name.startswith("kind_") and self.kind_answer is not None:
+                answers[name] = dict(self.kind_answer)
         return answers
 
 
@@ -192,6 +197,44 @@ class LifecycleTests(unittest.TestCase):
         result = self.ingest("Project Atlas might use a blue console.")
         self.assertEqual(result["review"], 1)
         self.assertEqual(self.engine.recall("Atlas", offline=True)["items"], [])
+
+    def test_kind_split_between_assertions_is_still_definite(self):
+        # JEV's confidence is a margin: 0.60 fact vs 0.39 preference reads as 0.21,
+        # yet the candidate is plainly not speculation.
+        split = {"fact": 0.60, "preference": 0.39, "uncertain": 0.01}
+        self.engine.provider = LifecycleDecisionFixture(
+            kind_answer={"value": "fact", "confidence": 0.21, "probabilities": split}
+        )
+        result = self.ingest("I have been watching a lot of documentaries on Netflix.")
+        self.assertEqual(result["active"], 1)
+
+    def test_likely_speculation_stays_review_even_when_not_top_choice(self):
+        split = {"fact": 0.40, "preference": 0.25, "uncertain": 0.35}
+        self.engine.provider = LifecycleDecisionFixture(
+            kind_answer={"value": "fact", "confidence": 0.05, "probabilities": split}
+        )
+        result = self.ingest("Project Atlas might use a blue console, I think.")
+        self.assertEqual(result["active"], 0)
+        self.assertEqual(result["review"], 1)
+
+    def test_definite_kind_falls_back_to_confidence_without_probabilities(self):
+        self.assertTrue(definite_kind({"value": "fact", "confidence": 0.70}))
+        self.assertFalse(definite_kind({"value": "fact", "confidence": 0.69}))
+        self.assertFalse(definite_kind({"value": "uncertain", "confidence": 0.99}))
+        self.assertFalse(
+            definite_kind(
+                {"value": "uncertain", "confidence": 0.1, "probabilities": {"uncertain": 0.2}}
+            )
+        )
+        # A malformed probability is ignored rather than trusted.
+        self.assertFalse(
+            definite_kind(
+                {"value": "fact", "confidence": 0.1, "probabilities": {"uncertain": float("nan")}}
+            )
+        )
+        self.assertTrue(
+            definite_kind({"value": "fact", "confidence": 0.1, "probabilities": {"uncertain": 0.3}})
+        )
 
     def test_assistant_tool_and_synthesis_are_not_promoted_to_facts(self):
         for role in ("assistant", "tool", "synthesis"):

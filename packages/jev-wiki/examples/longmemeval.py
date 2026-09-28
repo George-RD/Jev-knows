@@ -67,10 +67,12 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 from jev_wiki import __version__  # noqa: E402
 from jev_wiki.bm25 import bm25_scores  # noqa: E402
 from jev_wiki.engine import (  # noqa: E402
+    KIND_CONFIDENCE,
     RUBRIC_VERSION,
     SHORTLIST_BYTES,
     SHORTLIST_SIZE,
     Engine,
+    definite_kind,
 )
 from jev_wiki.provider import (  # noqa: E402
     JevProvider,
@@ -120,8 +122,8 @@ def jev_rerank(provider: JevProvider, query: str, claims: list[dict]) -> list[di
 
 # Acceptance policies, from the shipped gate to everything JEV did not hard-discard.
 # A threshold t activates a stored claim when JEV's top keep choice is "keep" with
-# confidence >= t and its kind is not "uncertain" and has confidence >= min(t, 0.70).
-# 0.82/0.70 reproduce the engine's gate, so "shipped" is the engine's own result.
+# confidence >= t and its kind is confidently not "uncertain" (definite_kind with floor
+# min(t, 0.70)). 0.82/0.70 reproduce the engine's gate, so "shipped" is the engine's own result.
 POLICIES = (
     ("shipped", None),
     ("keep>=0.75", 0.75),
@@ -143,8 +145,7 @@ def admits(claim: dict, threshold: float | None) -> bool:
     return (
         keep["value"] == "keep"
         and (keep.get("confidence") or 0) >= threshold
-        and kind["value"] != "uncertain"
-        and (kind.get("confidence") or 0) >= min(threshold, 0.70)
+        and definite_kind(kind, min(threshold, KIND_CONFIDENCE))
     )
 
 
