@@ -1,0 +1,107 @@
+"""Response-cache accounting, stats and clearing; no JEV credentials or network needed."""
+
+import os
+import sys
+import tempfile
+import unittest
+from collections import Counter
+from pathlib import Path
+from unittest.mock import patch
+
+from jev_wiki.cli import _parser, run
+from jev_wiki.provider import JevProvider, cache_stats, clear_cache
+
+from test_provider import RecordingTransport, choice
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+import longmemeval  # noqa: E402
+
+
+class CacheTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.directory = Path(self._tmp.name) / "cache"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def provider(self, transport):
+        return JevProvider("key", transport=transport, cache_dir=self.directory)
+
+    def test_repeat_run_pays_nothing_and_counts_saved_tokens(self):
+        first = self.provider(RecordingTransport())
+        first.ask("source", {"q": choice(), "r": choice("Other?")})
+        self.assertEqual(first.telemetry["cache_misses"], 1)
+        self.assertEqual(first.telemetry["input_tokens"], 100)
+
+        transport = RecordingTransport()
+        second = self.provider(transport)
+        second.ask("source", {"q": choice(), "r": choice("Other?")})
+        self.assertEqual(transport.requests, [])
+        self.assertEqual(second.telemetry["cache_hits"], 1)
+        self.assertEqual(second.telemetry["cache_misses"], 0)
+        self.assertEqual(second.telemetry["input_tokens"], 0)
+        self.assertEqual(second.telemetry["cached_input_tokens"], 100)
+        self.assertEqual(second.telemetry["cached_output_tokens"], 20)
+
+    def test_misses_are_not_counted_without_a_cache(self):
+        provider = JevProvider("key", transport=RecordingTransport())
+        provider.ask("source", {"q": choice()})
+        self.assertEqual(provider.telemetry["cache_misses"], 0)
+
+    def test_stats_and_clear_touch_only_cache_entries(self):
+        self.provider(RecordingTransport()).ask("one", {"q": choice()})
+        self.provider(RecordingTransport()).ask("two", {"q": choice()})
+        keep = self.directory / "notes.json"
+        keep.write_text("{}")
+        outside = Path(self._tmp.name) / ("v1-" + "0" * 64 + ".json")
+        outside.write_text("{}")
+        (self.directory / ("v1-" + "1" * 64 + ".json")).symlink_to(outside)
+
+        stats = cache_stats(self.directory)
+        self.assertEqual(stats["entries"], 2)
+        self.assertGreater(stats["bytes"], 0)
+        self.assertEqual(clear_cache(self.directory), 2)
+        self.assertEqual(cache_stats(self.directory)["entries"], 0)
+        self.assertTrue(keep.exists())
+        self.assertTrue(outside.exists())
+
+    def test_missing_or_symlinked_directory_is_empty(self):
+        self.assertEqual(cache_stats(self.directory)["entries"], 0)
+        self.assertEqual(clear_cache(self.directory), 0)
+        self.provider(RecordingTransport()).ask("one", {"q": choice()})
+        link = Path(self._tmp.name) / "link"
+        link.symlink_to(self.directory)
+        self.assertEqual(clear_cache(link), 0)
+        self.assertEqual(cache_stats(self.directory)["entries"], 1)
+
+    def test_cli_cache_command_reports_and_clears_the_wiki_cache(self):
+        root = Path(self._tmp.name) / "wiki"
+        self.directory = root / "cache" / "jev"
+        self.provider(RecordingTransport()).ask("one", {"q": choice()})
+        shown = run(_parser().parse_args(["--root", str(root), "cache"]))
+        self.assertEqual((shown["entries"], shown["removed"]), (1, 0))
+        cleared = run(_parser().parse_args(["--root", str(root), "cache", "--clear"]))
+        self.assertEqual((cleared["entries"], cleared["removed"]), (0, 1))
+        self.assertFalse((root / "state.json").exists())
+
+    def test_harness_cache_report(self):
+        telemetry = Counter(cache_hits=3, cache_misses=1, input_tokens=40, cached_input_tokens=90)
+        report = longmemeval.cache_report(str(self.directory), telemetry)
+        self.assertEqual(
+            (report["enabled"], report["hits"], report["misses"], report["saved_input_tokens"]),
+            (True, 3, 1, 90),
+        )
+        self.assertEqual(report["entries"], 0)
+        self.assertFalse(longmemeval.cache_report(None, Counter())["enabled"])
+
+    def test_harness_default_cache_dir_honours_xdg(self):
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": self._tmp.name}):
+            self.assertEqual(
+                longmemeval.default_cache_dir(),
+                Path(self._tmp.name) / "jev-wiki" / "longmemeval",
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

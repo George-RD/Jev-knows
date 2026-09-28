@@ -100,7 +100,9 @@ use JEV reranking; prompt hooks use lexical recall for predictable local operati
 - `wiki/notes/`: a suggested home for handwritten notes. Ingest them explicitly under
   stable source keys to make them available to recall.
 - `AGENTS.md`: local wiki instructions created by `init`, without replacing existing instructions.
-- `inbox/`: durable hook events and receipts; `cache/jev/`: optional model response cache.
+- `inbox/`: durable hook events and receipts; `cache/jev/`: model response cache, keyed
+  on the pinned model and exact request so repeats cost nothing. `cache` shows its size
+  and `cache --clear` empties it.
 
 Rebuild pages without inference:
 
