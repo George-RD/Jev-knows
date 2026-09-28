@@ -15,9 +15,11 @@ question answered ``--samples`` times and graded by majority.
 Systems:
 
 - ``none``: no notes.
-- ``bm25``: the 20 best BM25 chunks (about 1,000 characters each), the plain RAG baseline.
-- ``jev``: jev-wiki with keep-everything intake and offline recall at the CLI's
-  defaults (up to 40 claims for aggregate questions, neighbouring claims, date windows).
+- ``bm25``: the 20 best BM25 chunks (about 1,000 characters each, scored with their
+  source and title line), the plain RAG baseline.
+- ``jev``: jev-wiki with keep-everything intake and offline recall as the LongMemEval
+  harness runs it (up to 20 claims, 40 for aggregate questions, neighbouring claims,
+  date windows), as of the newest article.
 - ``jev_wide``: the same, but every question recalls up to 40 claims as an aggregate
   question would, so jev-wiki's notes are about as long as BM25's.
 - ``jev_passages``: the same recall, but each recalled claim is returned as the passage
@@ -32,7 +34,9 @@ Systems:
 - ``oracle``: the question's evidence articles.
 
 Every article is shown to every system as "source, date: title" followed by its body.
-The wiki is cached in ``--wiki-cache`` and resumes after an interruption.
+The wiki is cached in ``--wiki-cache`` and resumes after an interruption. Rows are
+saved as they are graded; ``--resume`` keeps them, and the rows of systems not named
+in ``--systems``, so several runs can share one ``--output``.
 
     python packages/jev-wiki/examples/multihop_head_to_head.py \
         --questions MultiHopRAG.json --corpus corpus.json --per-type 20 --output /tmp/mh.json
@@ -218,6 +222,7 @@ def jev_recall(question: dict, wide: bool = False) -> dict:
         max_chars=20_000,
         offline=True,
         aggregate_limit=_CONFIG["aggregate_limit"],
+        as_of=_STATE["as_of"],
         neighbours=True,
         window_claims=True,
     )
@@ -264,14 +269,16 @@ def jev_passage_notes(question: dict) -> tuple[str, dict]:
         text = texts.setdefault(source_id, engine.store.read_source(source_id))
         left, right = passage(text, start, end)
         ranges = spans.setdefault(source_id, [])
-        if source_id not in order:
-            order.append(source_id)
         overlap = [r for r in ranges if r[0] <= right and left <= r[1]]
         new_left = min([left] + [r[0] for r in overlap])
         new_right = max([right] + [r[1] for r in overlap])
         added = (new_right - new_left) - sum(r[1] - r[0] for r in overlap)
+        # Each extra range costs a separator, a first one its heading.
+        added += len("\n[...]\n") if ranges else len(_STATE["title_of"][source_id]) + 6
         if size + added > NOTES_CHARS:
             continue
+        if source_id not in order:
+            order.append(source_id)
         for r in overlap:
             ranges.remove(r)
         ranges.append([new_left, new_right])
@@ -289,7 +296,8 @@ def notes_for(system: str, question: dict) -> tuple[str, dict]:
         return "", {}
     if system == "bm25":
         pieces = _STATE["chunks"]
-        top = bm25_rank(question["query"], [p for _, p in pieces])[:BM25_CHUNKS]
+        # Score the "source, date: title" line too, as jev-wiki scores claims with titles.
+        top = bm25_rank(question["query"], [f"{h}\n{p}" for h, p in pieces])[:BM25_CHUNKS]
         return "\n\n".join(f"### {pieces[i][0]}\n{pieces[i][1]}" for i in top), {}
     if system == "oracle":
         titles = {e["title"] for e in question["evidence_list"]}
@@ -435,6 +443,9 @@ def main() -> int:
     _init(config, {})
     state: dict = {
         "articles": articles,
+        # Questions are asked once the corpus is complete, so relative dates count back
+        # from the newest article.
+        "as_of": max(a["published_at"][:10] for a in articles),
         "chunks": [(header(a), c) for a in articles for c in chunks(a["body"])],
     }
     report_extra = {
@@ -464,34 +475,55 @@ def main() -> int:
             build_jev(articles, root)
             report_extra["jev_build_seconds"] = round(time.perf_counter() - started, 1)
         state["jev_root"] = root
-        done = {}
+        done: dict = {}
         output = Path(args.output)
         if args.resume and output.exists():
-            for row in json.loads(output.read_text())["rows"]:
-                if "correct" in row:
+            previous = json.loads(output.read_text())
+            for row in previous["rows"]:
+                ok = (
+                    row["index"] < len(questions)
+                    and row["query"] == questions[row["index"]]["query"]
+                )
+                if not ok:
+                    parser.error(f"{output} was made with other questions; drop --resume")
+                if "correct" in row or row["system"] not in systems:
                     done[(row["system"], row["index"])] = row
+            # Keep the other systems' rows and their extras, so one file can hold every run.
+            report_extra = {**previous, **report_extra}
+            systems = list(dict.fromkeys(previous["config"]["systems"] + systems))
         todo = [(s, i, q) for s in systems for i, q in enumerate(questions) if (s, i) not in done]
-        with ProcessPoolExecutor(args.workers, initializer=_init, initargs=(config, state)) as pool:
-            for count, row in enumerate(pool.map(run, todo, chunksize=1), 1):
-                done[(row["system"], row["index"])] = row
-                if count % 10 == 0:
-                    print(f"{count}/{len(todo)} rows", file=sys.stderr, flush=True)
-    rows = [done[(s, i)] for s in systems for i in range(len(questions)) if (s, i) in done]
-    report = {
-        "benchmark": "MultiHop-RAG",
-        "config": {
-            **config,
-            "per_type": args.per_type,
-            "corpus_size": args.corpus_size,
-            "seed": args.seed,
-            "systems": systems,
-            "embedding_model": os.environ.get("JEV_WIKI_EMBEDDING_MODEL"),
-        },
-        **report_extra,
-        "summary": summarize(rows, systems),
-    }
+
+        def write() -> dict:
+            rows = [done[(s, i)] for s in systems for i in range(len(questions)) if (s, i) in done]
+            report = {
+                **{k: v for k, v in report_extra.items() if k not in ("rows", "config")},
+                "benchmark": "MultiHop-RAG",
+                "config": {
+                    **config,
+                    "per_type": args.per_type,
+                    "corpus_size": args.corpus_size,
+                    "seed": args.seed,
+                    "systems": systems,
+                    "embedding_model": os.environ.get("JEV_WIKI_EMBEDDING_MODEL"),
+                },
+                "summary": summarize(rows, systems),
+            }
+            tmp = output.with_suffix(".tmp")
+            tmp.write_text(json.dumps({**report, "rows": rows}, indent=1))
+            tmp.replace(output)
+            return report
+
+        try:
+            pool = ProcessPoolExecutor(args.workers, initializer=_init, initargs=(config, state))
+            with pool:
+                for count, row in enumerate(pool.map(run, todo, chunksize=1), 1):
+                    done[(row["system"], row["index"])] = row
+                    if count % 10 == 0:
+                        print(f"{count}/{len(todo)} rows", file=sys.stderr, flush=True)
+                        write()
+        finally:
+            report = write()
     print(json.dumps({k: v for k, v in report.items() if k != "config"}, indent=1))
-    output.write_text(json.dumps({**report, "rows": rows}, indent=1))
     return 0
 
 

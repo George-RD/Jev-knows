@@ -7,33 +7,33 @@ same comparison on questions that need that.
 
 ## Verdict
 
-**jev-wiki loses on connected questions at its defaults, and a simple fix gets it back
-level with plain search. The LLM Wiki does worse than both.**
+**On connected questions jev-wiki ties with plain search, and the LLM Wiki loses to
+both.**
 
-- Plain BM25 over article chunks answers 0.83 of the 80 questions. jev-wiki at the CLI
-  defaults answers 0.76. BM25 alone got 10 right that jev-wiki missed, jev-wiki alone 4.
-- The cause is what jev-wiki hands the reader: single sentences. A question like "who
-  do both TechCrunch and The Verge say was behind X" needs the paragraph around each
-  sentence, and sentence claims drop it. When each recalled claim is sent as the
-  passage around it in its article, jev-wiki answers 0.80, and the gap to BM25 (5 only
-  BM25, 3 only jev-wiki) is noise. Sending more sentences instead (0.79) helps less.
+- BM25 over article chunks answers 0.81 of the 80 questions. jev-wiki answers 0.79,
+  and 0.80 when each recalled claim is sent as the passage around it. The paired
+  counts (8 right only in BM25, 6 only in jev-wiki) are noise: the same jev-wiki notes
+  graded twice gave 0.76 and 0.79.
 - Karpathy's LLM Wiki, where the model files every article's facts onto entity pages,
   answers 0.46 when the model picks pages from the index, as the pattern describes,
-  and 0.71 when the pages are searched with BM25 instead. It is worst on exactly the
-  connected questions: comparisons 0.15 browsed and 0.65 searched, against 0.85 for BM25.
-  The structure it builds doesn't make up for what it loses in rewriting.
-- Reading only the articles that hold the answer scores 0.86, so every design here but
-  the browsed wiki is within a few questions of the ceiling this reader allows.
+  and 0.71 when its pages are searched with BM25 instead. It does worst on exactly
+  the connected questions: comparisons 0.15 browsed and 0.65 searched, against 0.85
+  for jev-wiki. jev-wiki beats it 27 questions to 1 browsed and 11 to 5 searched.
+- Reading only the articles that hold the answer scores 0.86, so jev-wiki and BM25 are
+  within a few questions of the ceiling this reader allows.
 
-So the bet holds as "simple retrieval memory done well", not as a relations system. On
-these questions no simple design gets anything from building relations up front: the
-reader connects the facts itself when it is given the right passages. The one change
-this points to is returning passages rather than lone sentences for document sources.
-That is a product change to recall, so it isn't made here.
+So the bet holds as "simple retrieval memory done well", and not as a relations system.
+On these questions, building relations up front gained nothing for any simple design:
+the reader connects the facts itself when it gets the right text, and a wiki that
+rewrites the articles into pages loses the details the questions turn on. jev-wiki's
+own weak spot here is small. A lone sentence like "the company said it would appeal"
+doesn't say which company. Sending passages instead of sentences fixes that for
+comparisons (0.74 to 0.85 in the first run), but overall it is worth no more than a
+point or two. Nothing about that points to changing recall.
 
 ## Setup
 
-- **Data**: MultiHop-RAG (Tang and Yang, COLM 2024): news articles from late 2023, with
+- **Data**: MultiHop-RAG (Tang and Yang, COLM 2024), news articles from late 2023, with
   questions that each need 2 to 4 of them. Four types: inference (what links two
   reports), comparison (do two sources agree), temporal (did coverage change between
   two dates), and null (the corpus can't answer). 80 questions, 20 of each type
@@ -52,8 +52,8 @@ The systems:
 
 | System | What the reader gets | Cost to build |
 |---|---|---|
-| BM25 | the 20 best chunks of about 1,000 characters | none |
-| **jev-wiki** | recalled claims at the CLI defaults (up to 40 for aggregate questions, neighbours, date windows) | local, 10 minutes for 150 articles |
+| BM25 | the 20 best chunks of about 1,000 characters, scored with their source and title | none |
+| **jev-wiki** | offline recall as in the LongMemEval harness (up to 20 claims, 40 for aggregate questions, with neighbours and date windows), as of the newest article | local, 10 minutes for 150 articles |
 | jev-wiki, more claims | up to 40 claims for every question | same |
 | jev-wiki, passages | the same recall, each claim sent as the paragraphs around it (about 1,000 characters), overlaps merged, up to 20,000 characters | same |
 | LLM Wiki | up to 10 pages the model picks from the index | 150 LLM calls, one after another |
@@ -61,10 +61,10 @@ The systems:
 | oracle | the question's evidence articles | not a real system |
 
 The LLM Wiki reads each article next to the current index and files its facts, each
-naming the source and date, onto new or existing pages. After 150 articles it has 2,624
-pages holding 5,967 facts, 1,775 of the pages with a single fact. The index alone is
-about 300,000 characters and every page together 1.07M, so the all-pages variant from
-the LongMemEval run doesn't fit a prompt here.
+naming the source and date, onto new or existing pages. No article failed. After 150
+articles it has 2,624 pages holding 5,967 facts, 1,775 of the pages with a single fact.
+The index alone is about 300,000 characters and every page together 1.07M, so the
+all-pages variant from the LongMemEval run doesn't fit a prompt here.
 
 ## Results
 
@@ -73,31 +73,29 @@ only the null questions (0.25 overall).
 
 | System | All | Inference | Comparison | Temporal | Null | Notes sent (chars) |
 |---|---:|---:|---:|---:|---:|---:|
-| BM25 | **0.83** | 0.95 | 0.85 | 0.55 | 0.95 | 20,300 |
-| jev-wiki | 0.76 | 0.80 | 0.74 | 0.55 | 0.95 | 10,700 |
-| jev-wiki, more claims | 0.79 | 0.85 | 0.80 | 0.55 | 0.95 | 15,000 |
-| **jev-wiki, passages** | **0.80** | 0.85 | 0.85 | 0.55 | 0.95 | 20,000 |
+| BM25 | **0.81** | 0.95 | 0.75 | 0.60 | 0.95 | 20,100 |
+| **jev-wiki** | **0.79** | 0.80 | 0.85 | 0.55 | 0.95 | 10,700 |
+| jev-wiki, more claims | 0.80 | 0.90 | 0.75 | 0.60 | 0.95 | 15,000 |
+| jev-wiki, passages | 0.80 | 0.85 | 0.85 | 0.55 | 0.95 | 18,900 |
 | LLM Wiki | 0.46 | 0.55 | 0.15 | 0.20 | 0.95 | 3,400 |
 | LLM Wiki, searched | 0.71 | 0.85 | 0.65 | 0.40 | 0.95 | 20,000 |
 | oracle | 0.86 | 1.00 | 0.80 | 0.65 | 1.00 | 20,300 |
 
-One jev-wiki question hit a rate limit on every retry, so its row is out of 79.
+Paired against jev-wiki (right only in the other system / right only in jev-wiki):
+BM25 8 / 6, jev-wiki with passages 4 / 3, LLM Wiki searched 5 / 11, LLM Wiki 1 / 27,
+oracle 10 / 4.
 
-Paired (right only in the other system / right only in the jev-wiki variant):
-
-| Against | jev-wiki | jev-wiki, passages |
-|---|---|---|
-| BM25 | 10 / 4 | 5 / 3 |
-| LLM Wiki, searched | 6 / 10 | 4 / 11 |
-| LLM Wiki | 1 / 24 | 2 / 29 |
-| oracle | 11 / 3 | 9 / 4 |
+**How much of this is noise.** The review run below regraded jev-wiki from exactly the
+same notes, and 8 of 80 verdicts flipped even with 3 answers per question (0.76 then
+0.79). So a gap of 2 or 3 points between two systems here means nothing; the LLM
+Wiki's 8 to 33 point gaps do.
 
 ## Why each system lost what it lost
 
-- **jev-wiki**: 7 of its 18 wrong answers on answerable questions are "Insufficient
-  information". The claims found the right articles but a sentence like "The company
-  said it would appeal" doesn't say which company. Passages carry that, and the
-  comparison column goes from 0.74 to 0.85.
+- **jev-wiki**: 16 wrong answers on answerable questions, 5 of them "Insufficient
+  information", where the recalled sentences named the right articles but left out
+  who or what they were about. The rest are wrong readings, mostly of temporal
+  questions.
 - **LLM Wiki, browsed**: 35 of its 42 wrong answers are "Insufficient information".
   The model picks about 2 pages out of 2,624 from a 300,000-character index, and the
   facts a question needs are spread over pages it didn't pick: "OpenAI", "OpenAI
@@ -111,14 +109,25 @@ Paired (right only in the other system / right only in the jev-wiki variant):
   whether two dated reports agree, which the reader often gets wrong with the right
   articles in front of it.
 
+## First run and what the review changed
+
+The first run gave BM25 0.83 against jev-wiki 0.76, and read as jev-wiki losing. A
+review of the script then found two things that favoured one side or the other:
+BM25 wasn't scoring the source and title line that jev-wiki scores with every claim,
+and jev-wiki recalled as of today rather than as of the corpus. Both were fixed and
+BM25 and every jev-wiki variant rerun. The date fix changed no jev-wiki notes; the
+title fix moved BM25 from 0.83 to 0.81. jev-wiki went from 0.76 to 0.79 from the same
+notes, which is the grading noise above. Passages scored 0.80 both times.
+
 ## What this means for sharing
 
-Put jev-wiki forward as a cheap, local retrieval memory that matches plain search and
-beats an LLM-built wiki, with the numbers from both runs. Don't put it forward as a
-system that understands relations: on this test nothing simple does, and the fix that
-worked was giving the reader more of the original text, not more structure.
+Put jev-wiki forward as a cheap, local retrieval memory that matches plain search on
+both single-fact and connected questions, and clearly beats an LLM-built wiki on
+connected ones, with the numbers from both runs. Don't put it forward as a system that
+understands relations: on this test nothing simple does, and what helps the reader is
+the original text, not more structure.
 
-Data: `/mnt/project-files/benchmarks/multihop-head-to-head-2026-09-28/` (`jev-bm25-oracle.json`
-and `llm-wiki.json`). The LLM Wiki is cached in
+Data: `/mnt/project-files/benchmarks/multihop-head-to-head-2026-09-28/multihop-80.json`
+(the tables above; `first-run-*.json` for the first run). The LLM Wiki is cached in
 `/mnt/project-files/benchmarks/llm-wiki-cache/multihop/`, so reruns only pay for
 reading and judging.
