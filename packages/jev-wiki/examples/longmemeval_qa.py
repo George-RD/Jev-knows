@@ -435,7 +435,13 @@ def main() -> int:
         resumed = {**config, "embedding_model": embedding_model()}
         del resumed["cache_dir"]  # where responses are cached does not change them
         # Reports from before --live ran offline.
-        before_live = {"live": False}
+        # Reports from before these options existed ran without them.
+        before_live = {
+            "live": False,
+            "neighbours": False,
+            "window_claims": False,
+            "save_notes": False,
+        }
         if {k: earlier["config"].get(k, before_live.get(k)) for k in resumed} != resumed:
             parser.error("--resume report was made with a different mode, models or embedder")
         done = {r["question_id"]: r for r in earlier["rows"] if "correct" in r}
