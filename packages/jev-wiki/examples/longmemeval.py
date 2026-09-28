@@ -397,7 +397,9 @@ def main() -> int:
         "--clear-cache", action="store_true", help="Empty the response cache before running"
     )
     args = parser.parse_args()
-    cache_dir = None if args.no_cache else str(args.cache_dir)
+    # The provider never caches aliases, whose target version can change.
+    aliased = args.model in {"jev-latest", "jev-preview"}
+    cache_dir = None if args.no_cache or aliased else str(args.cache_dir)
     if args.clear_cache:
         removed = clear_cache(args.cache_dir)
         print(f"cleared {removed} cached responses", file=sys.stderr, flush=True)

@@ -1,5 +1,6 @@
 """Response-cache accounting, stats and clearing; no JEV credentials or network needed."""
 
+import json
 import os
 import sys
 import tempfile
@@ -94,6 +95,22 @@ class CacheTests(unittest.TestCase):
         )
         self.assertEqual(report["entries"], 0)
         self.assertFalse(longmemeval.cache_report(None, Counter())["enabled"])
+
+    def test_harness_reports_cache_off_for_model_aliases(self):
+        data = Path(self._tmp.name) / "empty.json"
+        data.write_text("[]")
+        output = Path(self._tmp.name) / "report.json"
+        argv = ["longmemeval", "--data", str(data), "--output", str(output), "--workers", "1"]
+        argv += ["--cache-dir", str(self.directory)]
+        for model, enabled in (("jev-latest", False), ("jev-1.13.0", True)):
+            with (
+                patch.dict(os.environ, {"TYPESAFE_API_KEY": "fixture-key"}),
+                patch.object(sys, "argv", [*argv, "--model", model]),
+                patch("builtins.print"),
+            ):
+                self.assertEqual(longmemeval.main(), 0)
+            report = json.loads(output.read_text())
+            self.assertEqual(report["cache"]["enabled"], enabled)
 
     def test_harness_default_cache_dir_honours_xdg(self):
         with patch.dict(os.environ, {"XDG_CACHE_HOME": self._tmp.name}):
