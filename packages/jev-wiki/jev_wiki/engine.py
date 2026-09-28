@@ -573,8 +573,9 @@ class Engine:
                 similarities = None
         candidates = _candidates(claims, scores, lifted, similarities)
         shortlist = _shortlist(candidates)
-        # Claims the ranker saw; one it scored below the cut never returns unranked.
-        shortlisted = {c["id"] for c in shortlist}
+        # Claims the ranker saw; one it scored below the cut never returns unranked,
+        # nor does the same text from another source.
+        shortlisted = {c["id"] for c in shortlist} | {c["text"] for c in shortlist}
         degraded = self.provider is None or offline
         mode = "lexical" if similarities is None else "hybrid"
         if shortlist and self.provider is not None and not offline:
@@ -626,7 +627,11 @@ class Engine:
             # for the remaining budget without loading every candidate's evidence.
             tail = heapq.nsmallest(
                 2 * (limit - len(shortlist)),
-                (c for c in candidates if c["id"] not in shortlisted),
+                (
+                    c
+                    for c in candidates
+                    if c["id"] not in shortlisted and c["text"] not in shortlisted
+                ),
                 key=_order,
             )
             ordered = [*shortlist, *tail]

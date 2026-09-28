@@ -105,6 +105,17 @@ class AggregateRecallTests(unittest.TestCase):
         self.assertTrue(all(i["relevance"] is None for i in result["items"][12:]))
         self.assertEqual(result["mode"], "jev_reranked")
 
+    def test_a_rejected_text_does_not_return_from_another_source(self):
+        provider = Scored()
+        engine = Engine(self.root, provider)
+        engine.recall("How many fun runs did I do?", limit=20, aggregate_limit=40)
+        ranked_state, _ = provider.calls[-1]
+        rejected = ranked_state["0"]
+        engine.ingest(rejected, source_key="copy")
+        provider.calls.clear()
+        result = engine.recall("How many fun runs did I do?", limit=20, aggregate_limit=40)
+        self.assertNotIn(rejected, [i["text"] for i in result["items"]])
+
     def test_invalid_aggregate_limits_are_rejected(self):
         for value in (0, MAX_AGGREGATE_LIMIT + 1, True, 2.5):
             with self.assertRaises(ValueError):
