@@ -364,9 +364,16 @@ class StaticEmbedder:
         if backlog:
             todo = todo[: self.max_new]
         new = {}
-        if todo:
-            encoded = self.encode([texts[rows[0]] for _, rows in todo])
-            for vector, (digest, rows) in zip(encoded, todo):
+        timeout = None
+        # One batch at a time, so batches finished before a deadline are still saved.
+        for begin in range(0, len(todo), ENCODE_BATCH):
+            batch = todo[begin : begin + ENCODE_BATCH]
+            try:
+                encoded = self.encode([texts[rows[0]] for _, rows in batch])
+            except EmbeddingTimeout as error:
+                timeout = error
+                break
+            for vector, (digest, rows) in zip(encoded, batch):
                 self._memory[digest] = new[digest] = vector
                 matrix[rows] = vector
         live = len(set(digests))
@@ -376,6 +383,8 @@ class StaticEmbedder:
         if self._cache_file is not None and (new or due):
             known = {d: matrix[row] for row, d in enumerate(digests) if d not in missing}
             self._save({**known, **new}, new)
+        if timeout is not None:
+            raise timeout
         if backlog:
             raise EmbeddingTimeout(f"{len(missing) - len(todo)} claims still need vectors")
         return matrix, len(todo)

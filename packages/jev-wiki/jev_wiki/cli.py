@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -219,6 +220,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "hook":
         from .hooks import handle_hook, hook_time_budget, read_payload
 
+        started = time.monotonic()
         try:
             with hook_time_budget():
                 payload = read_payload(sys.stdin.buffer)
@@ -226,7 +228,11 @@ def main(argv: list[str] | None = None) -> int:
                     {}
                     if payload is None
                     else handle_hook(
-                        args.root, payload, project_root=args.project_root, max_chars=args.max_chars
+                        args.root,
+                        payload,
+                        project_root=args.project_root,
+                        max_chars=args.max_chars,
+                        started=started,
                     )
                 )
             # Empty JSON is a valid no-op; never emit a block or continue directive.

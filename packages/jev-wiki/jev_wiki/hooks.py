@@ -225,13 +225,15 @@ def handle_hook(
     *,
     project_root: str | Path,
     max_chars: int = MAX_CONTEXT_CHARS,
+    started: float | None = None,
 ) -> dict[str, Any]:
     """Handle a supported event without ever blocking the agent's action.
 
     Missing scope, malformed input, storage failures and retrieval failures all
     produce an empty result. No transcript path is read, even if one is supplied.
     """
-    started = time.monotonic()
+    # The embedding deadline counts from the caller's budget start (hook_time_budget).
+    started = time.monotonic() if started is None else started
     try:
         if not isinstance(payload, dict) or len(_canonical(payload)) > MAX_PAYLOAD_BYTES:
             return {}

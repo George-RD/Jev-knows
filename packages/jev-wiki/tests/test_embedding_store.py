@@ -228,6 +228,23 @@ class StaticEmbedderTests(unittest.TestCase):
         _, encoded = self.embedder(max_new=2).vectors(texts)
         self.assertEqual(encoded, 1)
 
+    def test_batches_encoded_before_a_deadline_are_saved(self):
+        embedder = self.embedder()
+        calls = iter([None, embedding.EmbeddingTimeout("late")])
+
+        def check():
+            outcome = next(calls, None)
+            if outcome is not None:
+                raise outcome
+
+        embedder._check_deadline = check
+        with (
+            mock.patch.object(embedding, "ENCODE_BATCH", 1),
+            self.assertRaises(embedding.EmbeddingTimeout),
+        ):
+            embedder.vectors(["basil", "report"])
+        self.assertEqual(self.records(), 1)
+
     def test_passed_deadline_stops_loading_and_encoding(self):
         with self.assertRaises(embedding.EmbeddingTimeout):
             self.embedder(deadline=time.monotonic() - 1)
@@ -328,6 +345,26 @@ class HookEmbedderTests(unittest.TestCase):
     def test_spent_budget_leaves_the_hook_lexical(self):
         lazy = self.build(str(self.model), started=time.monotonic() - 10)
         self.assertIsNone(lazy.embedder)
+
+    def test_hook_deadline_counts_from_the_callers_start(self):
+        from jev_wiki.engine import Engine
+        from test_lifecycle import LifecycleDecisionFixture
+
+        engine = Engine(self.root, LifecycleDecisionFixture())
+        engine.ingest("basil tomatoes garden.", source_key="notes")
+        project = self.tmp / "project"
+        project.mkdir()
+        payload = {
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "dinner ideas",
+            "session_id": "s1",
+            "cwd": str(project),
+        }
+        with mock.patch.dict(os.environ, {embedding.ENV_VAR: str(self.model)}):
+            late = hooks.handle_hook(
+                self.root, payload, project_root=project, started=time.monotonic() - 10
+            )
+        self.assertEqual(late, {})  # Embeddings skipped; "dinner" has no lexical match.
 
     def test_hook_recall_uses_embeddings_end_to_end(self):
         from jev_wiki.engine import Engine
