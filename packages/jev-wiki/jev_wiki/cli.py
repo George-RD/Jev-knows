@@ -71,7 +71,7 @@ def _parser() -> argparse.ArgumentParser:
     recall.add_argument(
         "--backfill",
         action="store_true",
-        help="Keep claims below --min-relevance after the promoted ones, in lexical order",
+        help="Keep claims below --min-relevance after the promoted ones, in --offline order",
     )
     maintain = commands.add_parser("maintain", help="Run bounded relation checks")
     maintain.add_argument("--max-pairs", type=int, default=20)

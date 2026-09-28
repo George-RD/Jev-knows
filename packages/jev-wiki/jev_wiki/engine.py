@@ -515,8 +515,9 @@ class Engine:
 
         With a provider, JEV scores each shortlisted claim 0–3 and claims scoring at
         least ``min_relevance`` come first, best score first. Without ``backfill`` the
-        rest are dropped; with it they follow in shortlist (lexical) order, so the
-        rerank only reorders and never loses a lexical candidate.
+        rest are dropped; with it they follow in shortlist order (the order
+        ``offline=True`` returns: lexical, or hybrid with an embedder), so the rerank
+        only reorders and never loses a shortlisted candidate.
         """
         if not isinstance(query, str) or not query.strip() or len(query) > 2000:
             raise ValueError("query must contain 1–2000 characters")
