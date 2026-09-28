@@ -207,10 +207,10 @@ class CliAggregateDefaultTests(unittest.TestCase):
             "How many charity fun runs did I do?", "--offline", "--aggregate-limit", "0"
         )
         self.assertFalse(result["aggregate"])
-        self.assertEqual(len(result["items"]), 5)
+        self.assertEqual(len([i for i in result["items"] if "neighbour_of" not in i]), 5)
 
     def test_other_questions_keep_the_plain_limit(self):
-        result = self.recall("Tell me about my charity fun run", "--offline")
+        result = self.recall("Tell me about my charity fun run", "--offline", "--no-neighbours")
         self.assertFalse(result["aggregate"])
         self.assertEqual(len(result["items"]), 5)
 

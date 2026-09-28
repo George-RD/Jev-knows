@@ -76,6 +76,13 @@ def _parser() -> argparse.ArgumentParser:
         f"(default {DEFAULT_AGGREGATE_LIMIT}; 0 turns it off). --max-chars still bounds them",
     )
     recall.add_argument(
+        "--no-neighbours",
+        dest="neighbours",
+        action="store_false",
+        help="Leave out the claims next to each recalled claim, which recall adds by "
+        "default outside --limit, in at most a quarter of --max-chars",
+    )
+    recall.add_argument(
         "--min-relevance",
         type=float,
         help="JEV rerank score (0–3) a claim needs to be kept or promoted (default: 1.5)",
@@ -219,6 +226,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             offline=args.offline,
             aggregate_limit=args.aggregate_limit or None,
             backfill=args.backfill,
+            neighbours=args.neighbours,
             **({} if args.min_relevance is None else {"min_relevance": args.min_relevance}),
         )
     if args.command == "maintain":

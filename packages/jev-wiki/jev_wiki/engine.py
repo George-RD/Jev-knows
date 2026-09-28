@@ -468,6 +468,31 @@ def time_window(query: str, as_of: date) -> dict | None:
     return {"phrase": match.group(0), "start": start.isoformat(), "end": end.isoformat()}
 
 
+# The sentence that answers a question often shares no words with it: "I got a set of
+# 10 for $25 about a month ago" follows the sentence naming the training pads, and "I
+# got it a month ago" follows the one naming the ring. recall(neighbours=True) adds the
+# claims either side of each recalled claim, after it and outside the claim limit, up
+# to max(MIN_NEIGHBOURS, limit // 2) of them in a quarter of max_chars
+# (docs/evidence-neighbours-2026-09-28.md).
+MIN_NEIGHBOURS = 5
+NEIGHBOUR_SHARE = 4
+
+
+def _adjacent(claims: list[dict]) -> dict[str, list[dict]]:
+    """Each claim's next and previous claim in its source, by position, next first."""
+    by_source: dict[str, list[dict]] = {}
+    for claim in claims:
+        by_source.setdefault(claim["source_id"], []).append(claim)
+    adjacent: dict[str, list[dict]] = {}
+    for ordered in by_source.values():
+        ordered.sort(key=lambda c: (c["start"], c["end"], c["id"]))
+        for index, claim in enumerate(ordered):
+            adjacent[claim["id"]] = [
+                ordered[near] for near in (index + 1, index - 1) if 0 <= near < len(ordered)
+            ]
+    return adjacent
+
+
 def source_date(source: dict) -> str | None:
     """When a source happened: ``metadata["date"]`` if the caller gave one, else capture."""
     day = _as_day((source.get("metadata") or {}).get("date")) or _as_day(source.get("created_at"))
@@ -697,6 +722,7 @@ class Engine:
         as_of: date | str | None = None,
         min_relevance: float = MIN_RELEVANCE,
         backfill: bool = False,
+        neighbours: bool = False,
     ) -> dict:
         """Pack whole evidence blocks using the caller's trusted output-size measure.
 
@@ -717,6 +743,12 @@ class Engine:
         rest are dropped; with it they follow in shortlist order (the order
         ``offline=True`` returns: lexical, or hybrid with an embedder), so the rerank
         only reorders and never loses a shortlisted candidate.
+
+        With ``neighbours``, each recalled claim is followed by the claims next to it in
+        its source (the next one first), marked ``neighbour_of``. They don't count
+        toward the limit; up to ``max(MIN_NEIGHBOURS, limit // 2)`` of them are added,
+        using at most a quarter of ``max_chars``. A claim the ranker scored below the
+        cut is never added as a neighbour.
         """
         if not isinstance(query, str) or not query.strip() or len(query) > 2000:
             raise ValueError("query must contain 1–2000 characters")
@@ -837,6 +869,7 @@ class Engine:
                 copies.add(copy)
                 tail.append(c)
         context, items, seen = header, [], set()
+        counted = 0  # Items that count toward limit: neighbours don't.
 
         def block_for(claim: dict, conflicts: list) -> str:
             citation = f"{claim['source']['path']}#chars={claim['start']}-{claim['end']}"
@@ -859,15 +892,15 @@ class Engine:
             # possible block still fits, so a spent budget costs no store reads.
             batch: list[dict] = []
             for claim in claims:
-                if len(items) >= limit:
+                if counted >= limit:
                     return
                 if context_cost(context + block_for(claim, [])) > max_chars:
                     continue
                 batch.append(claim)
-                if len(batch) >= 2 * (limit - len(items)):
+                if len(batch) >= 2 * (limit - counted):
                     yield from load(batch)
                     batch = []
-            if batch and len(items) < limit:
+            if batch and counted < limit:
                 yield from load(batch)
 
         def in_window(claims: list[dict], inside: bool) -> list[dict]:
@@ -885,38 +918,86 @@ class Engine:
                 yield from load(in_window(shortlist, inside))
                 yield from fill(in_window(tail, inside))
 
-        for claim, evidence in pending():
+        adjacent = _adjacent(claims) if neighbours else {}
+        # What the ranker scored below the cut stays out, as in the aggregate tail.
+        kept_ids = {c["id"] for c in shortlist}
+        ranked_out = {c["text"] for c in sent if c["id"] not in kept_ids}
+        spare = {"claims": max(MIN_NEIGHBOURS, limit // 2), "chars": max_chars // NEIGHBOUR_SHARE}
+        packed: set[str] = set()
+        # One store read for the neighbours of the claims likely to be packed; the
+        # rest are read per anchor.
+        checked = {
+            n["id"] for c in (*shortlist, *tail[: 2 * limit]) for n in adjacent.get(c["id"], ())
+        }
+        prefetched = self.store.active_evidence(sorted(checked)) if checked else {}
+
+        def neighbour_evidence(near: list[dict]) -> Iterator[tuple[dict, dict]]:
+            unchecked = [n["id"] for n in near if n["id"] not in checked]
+            current = (
+                {**prefetched, **self.store.active_evidence(unchecked)} if unchecked else prefetched
+            )
+            for n in near:
+                if n["id"] in current:
+                    yield n, current[n["id"]]
+
+        def add(claim: dict, evidence: dict, anchor: str | None = None) -> bool:
+            nonlocal context
             claim.update(evidence)
             digest = hashlib.sha256(claim["text"].encode()).hexdigest()
             if aggregate:
                 # Counting needs each source's mention, even when the words repeat.
                 digest += claim["source_id"]
             if digest in seen:
-                continue
+                return False
             # active_evidence rechecked current status, exact quotes and hashes
             # together after the ranker returned. Future mutations take effect
             # on the next recall, as with any snapshot read.
             citation = f"{claim['source']['path']}#chars={claim['start']}-{claim['end']}"
             conflicts = [r for r in claim.get("relations", []) if r.get("type") == "conflict"]
             block = block_for(claim, conflicts)
-            if context_cost(context + block) > max_chars:
-                continue  # Never truncate a quote into a misleading partial assertion.
+            cost = context_cost(context + block)
+            if cost > max_chars:
+                return False  # Never truncate a quote into a misleading partial assertion.
+            if anchor is not None:
+                used = cost - context_cost(context)
+                if used > spare["chars"]:
+                    return False
+                spare["chars"] -= used
+                spare["claims"] -= 1
             context += block
-            items.append(
-                {
-                    "id": claim["id"],
-                    "source_id": claim["source_id"],
-                    "text": claim["text"],
-                    "citation": citation,
-                    "kind": claim["kind"],
-                    "conflicts": conflicts,
-                    "relevance": claim.get("relevance"),
-                    "provider": claim.get("provider"),
-                    "date": claim["source"]["date"],
-                }
-            )
+            item = {
+                "id": claim["id"],
+                "source_id": claim["source_id"],
+                "text": claim["text"],
+                "citation": citation,
+                "kind": claim["kind"],
+                "conflicts": conflicts,
+                "relevance": claim.get("relevance"),
+                "provider": claim.get("provider"),
+                "date": claim["source"]["date"],
+            }
+            if anchor is not None:
+                item["neighbour_of"] = anchor
+            items.append(item)
             seen.add(digest)
-            if len(items) >= limit:
+            packed.add(claim["id"])
+            return True
+
+        for claim, evidence in pending():
+            if not add(claim, evidence):
+                continue
+            counted += 1
+            near = [
+                {**n}
+                for n in adjacent.get(claim["id"], ())
+                if n["id"] not in packed and n["text"] not in ranked_out
+            ]
+            if near and spare["claims"] > 0:
+                for neighbour, current in neighbour_evidence(near):
+                    if spare["claims"] <= 0:
+                        break
+                    add(neighbour, current, anchor=claim["id"])
+            if counted >= limit:
                 break
         return {
             "query": query,
@@ -927,6 +1008,7 @@ class Engine:
             "candidate_count": len(candidates),
             "aggregate": aggregate,
             "time_window": window,
+            "neighbours": sum("neighbour_of" in i for i in items),
         }
 
     def maintain(self, max_pairs: int = 20) -> dict:

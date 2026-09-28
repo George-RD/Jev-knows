@@ -17,7 +17,8 @@ Context modes:
   captured; LongMemEval's temporal questions are unanswerable without it.
   ``--aggregate-limit N`` lets counting and date questions recall up to N claims. Each
   chat is ingested with its date and recall runs as of the question's date, so "two
-  weeks ago" resolves the way it would have that day.
+  weeks ago" resolves the way it would have that day. ``--neighbours`` adds the claims
+  next to each recalled claim (``Engine.recall(neighbours=True)``).
 - ``oracle``: the user turns of the labelled evidence sessions, dated. The ceiling for a
   store that keeps only user turns; the gap to ``wiki`` is what recall and claim
   splitting lose.
@@ -183,6 +184,7 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
             offline=True,
             aggregate_limit=_CONFIG.get("aggregate_limit"),
             as_of=iso_date(item["question_date"]),
+            neighbours=bool(_CONFIG.get("neighbours")),
         )
     keys = [key_of[i["source_id"]] for i in result["items"]]
     notes = "\n".join(
@@ -194,6 +196,7 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
         "claims": len(result["items"]),
         "aggregate": result["aggregate"],
         "time_window": result["time_window"],
+        "neighbours": result["neighbours"],
         "recall_any@10": retrieval.get("recall_any@10"),
     }
 
@@ -229,6 +232,8 @@ def run_question(item: dict) -> dict:
         notes = ""
     row["recall_seconds"] = round(time.perf_counter() - started, 2)
     row["notes_chars"] = len(notes)
+    if _CONFIG.get("save_notes"):
+        row["notes"] = notes
     prompt = READER_PROMPT.format(
         notes=notes or "(none)", date=item["question_date"], question=item["question"]
     )
@@ -289,6 +294,14 @@ def main() -> int:
         type=int,
         help="wiki mode: recall up to this many claims for counting and date questions",
     )
+    parser.add_argument(
+        "--neighbours",
+        action="store_true",
+        help="wiki mode: add the claims next to each recalled claim",
+    )
+    parser.add_argument(
+        "--save-notes", action="store_true", help="keep each question's notes in its row"
+    )
     parser.add_argument("--output", help="write the full report (summary and rows) here")
     parser.add_argument(
         "--resume", help="an earlier --output report: keep its graded rows, rerun the rest"
@@ -304,6 +317,8 @@ def main() -> int:
         "judge": args.judge,
         "endpoint": args.endpoint,
         "aggregate_limit": args.aggregate_limit,
+        "neighbours": args.neighbours,
+        "save_notes": args.save_notes,
     }
     done = {}
     if args.resume:
