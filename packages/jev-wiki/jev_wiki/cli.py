@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -142,10 +143,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         use_provider = False
     embedder = None
     # --offline promises lexical retrieval; loading a model by name can reach the network.
-    if args.command == "recall" and not args.offline:
-        from .embedding import from_env
+    if args.command in {"recall", "worker"} and not getattr(args, "offline", False):
+        from .embedding import VECTOR_DIR, from_env
 
-        embedder = from_env()
+        embedder = from_env(cache_dir=Path(args.root) / VECTOR_DIR)
     engine = Engine(
         args.root, provider=_provider(args) if use_provider else None, embedder=embedder
     )
@@ -185,6 +186,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         result["reclassified"] = engine.reclassify()
         if not args.no_maintain:
             result["maintenance"] = engine.maintain(max_pairs=args.max_pairs)
+        if embedder is not None:
+            # Index new claims now, so the prompt hook finds their vectors on disk.
+            try:
+                _, encoded = embedder.vectors([c["text"] for c in engine.store.claims()])
+                result["embeddings"] = {"model": embedder.name, "encoded": encoded}
+            except Exception as error:  # noqa: BLE001 - optional index; sources are already processed.
+                # Optional: the hook encodes what is missing or stays lexical.
+                result["embeddings"] = {"model": embedder.name, "error": type(error).__name__}
         return result
     if args.command == "recall":
         return engine.recall(
@@ -211,6 +220,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "hook":
         from .hooks import handle_hook, hook_time_budget, read_payload
 
+        started = time.monotonic()
         try:
             with hook_time_budget():
                 payload = read_payload(sys.stdin.buffer)
@@ -218,7 +228,11 @@ def main(argv: list[str] | None = None) -> int:
                     {}
                     if payload is None
                     else handle_hook(
-                        args.root, payload, project_root=args.project_root, max_chars=args.max_chars
+                        args.root,
+                        payload,
+                        project_root=args.project_root,
+                        max_chars=args.max_chars,
+                        started=started,
                     )
                 )
             # Empty JSON is a valid no-op; never emit a block or continue directive.

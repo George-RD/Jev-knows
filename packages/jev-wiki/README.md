@@ -45,9 +45,13 @@ The first use downloads `minishlab/potion-retrieval-32M` (129 MB) from Hugging F
 a local path needs no network. `recall` then adds the claims most similar to the query
 to its shortlist. The embedding itself runs on your machine; with `TYPESAFE_API_KEY`
 set, ordinary `recall` still sends the query and shortlisted claims to TypeSafe for
-reranking. `recall --offline` and the
-prompt hook stay lexical: loading the model takes about a second, over the hook's
-0.75 s budget.
+reranking. `recall --offline` stays lexical.
+
+The prompt hook uses the same model when it is already downloaded: it never downloads,
+reads the model memory-mapped (about 0.1 s), and reads claim vectors that `worker` and
+`recall` save under `<root>/embeddings/`. If loading or encoding new claims would run
+past 0.55 s of the hook's 0.75 s budget, that prompt's recall stays lexical. See
+[docs/hook-embeddings-2026-09-27.md](docs/hook-embeddings-2026-09-27.md).
 
 Questions that count, total, order or date events ("how many weddings did I go to",
 "which did I start first") need every mention, not the best few. `recall
@@ -94,7 +98,8 @@ jev-wiki --root /absolute/path/to/my-memory worker --limit 100
 
 Run the worker yourself or schedule that command on the host. No hook configuration,
 background service or scheduled job is installed automatically. Direct CLI recall can
-use JEV reranking; prompt hooks use lexical recall for predictable local operation.
+use JEV reranking; prompt hooks never call a provider, and use local embedding
+candidates only when a downloaded model loads within their budget.
 
 ## Files and editing
 

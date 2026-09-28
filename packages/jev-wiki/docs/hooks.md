@@ -2,7 +2,8 @@
 
 The adapter captures prompts and completed assistant messages into a local
 inbox. Before each prompt, it retrieves already compiled memory using a bounded
-lexical search. Only the separate worker sends source text to JEV. Capture and
+local search: BM25, plus embedding candidates when `JEV_WIKI_EMBEDDING_MODEL` names a
+model that is already downloaded and loads within the hook's budget. Only the separate worker sends source text to JEV. Capture and
 recall therefore do not depend on the main assistant choosing a memory tool.
 
 The [official hooks reference](https://code.claude.com/docs/en/hooks) was checked
