@@ -18,7 +18,7 @@ import re
 import stat
 import tempfile
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -507,6 +507,46 @@ class WikiStore:
             state["claims"][claim_id] = claim
             self._event(state, "claim_updated", claim_id=claim_id, fields=sorted(updates))
             self._save(state)
+
+    def promote_review_claims(
+        self, rubric_version: str, admits: Callable[[dict, dict], bool]
+    ) -> list[str]:
+        """Activate intake-review claims of current sources that ``admits(claim, source)``.
+
+        Eligibility is decided under the lock, so a concurrent update always wins:
+        claims with a review reason, from another rubric, or already updated by a
+        caller (a ``claim_updated`` event) are never promoted. Only current sources'
+        raw text is read. Returns the promoted claim ids.
+        """
+        with self._locked():
+            state = self._load()
+            updated = {
+                event["data"].get("claim_id")
+                for event in state["events"]
+                if event.get("type") == "claim_updated"
+            }
+            promoted, raw = [], {}
+            for claim_id, claim in state["claims"].items():
+                source = state["sources"][claim["source_id"]]
+                if (
+                    claim["status"] != "review"
+                    or claim.get("review_reason")
+                    or claim.get("rubric_version") != rubric_version
+                    or claim_id in updated
+                    or not self._current(state, source)
+                    or not admits(copy.deepcopy(claim), copy.deepcopy(source))
+                ):
+                    continue
+                if source["id"] not in raw:
+                    raw[source["id"]] = self._source_text(source)
+                state["claims"][claim_id] = self._validate_claim(
+                    {**claim, "status": "active"}, source["id"], raw[source["id"]]
+                )
+                promoted.append(claim_id)
+            if promoted:
+                self._event(state, "claims_promoted", claim_ids=promoted)
+                self._save(state)
+            return promoted
 
     def forget(self, source_key: str) -> dict:
         """Tombstone every revision and remove its claims from all derived views."""

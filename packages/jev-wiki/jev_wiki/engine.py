@@ -541,34 +541,13 @@ class Engine:
         review reason (superseded or forgotten sources), claims from an older rubric,
         and any claim a caller has already updated, so a manual demotion stands.
         """
-        sources = {s["id"]: s for s in self.store.sources()}
-        updated = {
-            event["data"].get("claim_id")
-            for event in self.store.events()
-            if event.get("type") == "claim_updated"
-        }
-        promoted = 0
-        for claim in self.store.claims(active_only=False):
-            source = sources.get(claim["source_id"])
-            if (
-                source is None
-                or claim["status"] != "review"
-                or claim.get("review_reason")
-                or claim.get("rubric_version") != RUBRIC_VERSION
-                or claim["id"] in updated
-            ):
-                continue
+
+        def admits(claim: dict, source: dict) -> bool:
             decisions = claim.get("decisions") or {}
             role = source.get("metadata", {}).get("role", "document")
-            if not activates(decisions.get("keep") or {}, decisions.get("kind") or {}, role):
-                continue
-            try:
-                self.store.update_claim(claim["id"], {"status": "active"})
-            except ValueError:
-                if self.store.is_current(claim["source_id"]):
-                    raise
-                continue  # Superseded or forgotten since the snapshot.
-            promoted += 1
+            return activates(decisions.get("keep") or {}, decisions.get("kind") or {}, role)
+
+        promoted = len(self.store.promote_review_claims(RUBRIC_VERSION, admits))
         if promoted:
             self.store.render()
         return {"promoted": promoted}

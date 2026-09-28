@@ -271,6 +271,42 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(promoted, {"I have been watching a lot of documentaries on Netflix."})
         self.assertEqual(self.engine.reclassify(), {"promoted": 0})
 
+    def test_reclassify_ignores_forgotten_sources_whose_raw_text_is_gone(self):
+        def margin_gate(kind, floor=0.70):
+            return kind.get("value") != "uncertain" and kind.get("confidence", 0) >= floor
+
+        split = kind_answer("preference", preference=0.60, fact=0.39, uncertain=0.01)
+        self.engine.provider = LifecycleDecisionFixture(kind_answer=split)
+        with mock.patch("jev_wiki.engine.definite_kind", margin_gate):
+            self.ingest("I have been watching a lot of documentaries on Netflix.")
+            self.ingest("My old flat had a blue door.", "gone")
+        gone = next(s for s in self.engine.store.sources() if s["source_key"] == "gone")
+        self.engine.forget("gone")
+        (self.root / gone["path"]).unlink()
+        self.assertEqual(self.engine.reclassify(), {"promoted": 1})
+
+    def test_update_during_reclassify_is_not_overwritten(self):
+        # Eligibility is decided under the store lock, after any earlier update landed.
+        def margin_gate(kind, floor=0.70):
+            return kind.get("value") != "uncertain" and kind.get("confidence", 0) >= floor
+
+        split = kind_answer("preference", preference=0.60, fact=0.39, uncertain=0.01)
+        self.engine.provider = LifecycleDecisionFixture(kind_answer=split)
+        with mock.patch("jev_wiki.engine.definite_kind", margin_gate):
+            self.ingest("I have been watching a lot of documentaries on Netflix.")
+        claim = self.engine.store.claims(active_only=False)[0]
+        original = self.engine.store.promote_review_claims
+
+        def demote_first(*args, **kwargs):
+            self.engine.store.update_claim(
+                claim["id"], {"status": "review", "review_reason": "user_rejected"}
+            )
+            return original(*args, **kwargs)
+
+        with mock.patch.object(self.engine.store, "promote_review_claims", demote_first):
+            self.assertEqual(self.engine.reclassify(), {"promoted": 0})
+        self.assertEqual(self.engine.store.claims(), [])
+
     def test_assistant_tool_and_synthesis_are_not_promoted_to_facts(self):
         for role in ("assistant", "tool", "synthesis"):
             with self.subTest(role=role):
