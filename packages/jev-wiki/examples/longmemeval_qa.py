@@ -15,7 +15,9 @@ Context modes:
 - ``wiki``: the claims ``Engine.recall(offline=True)`` returns (up to 20, 20k chars), each
   prefixed with the date of the chat it came from. An agent's memory knows when a note was
   captured; LongMemEval's temporal questions are unanswerable without it.
-  ``--aggregate-limit N`` lets counting and date questions recall up to N claims.
+  ``--aggregate-limit N`` lets counting and date questions recall up to N claims. Each
+  chat is ingested with its date and recall runs as of the question's date, so "two
+  weeks ago" resolves the way it would have that day.
 - ``oracle``: the user turns of the labelled evidence sessions, dated. The ceiling for a
   store that keeps only user turns; the gap to ``wiki`` is what recall and claim
   splitting lose.
@@ -148,6 +150,11 @@ def judge_prompt(item: dict, response: str) -> str:
     return template.format(question=item["question"], answer=item["answer"], response=response)
 
 
+def iso_date(longmemeval_date: str) -> str:
+    """'2023/05/30 (Tue) 23:40' -> '2023-05-30'."""
+    return longmemeval_date.split(" ", 1)[0].replace("/", "-")
+
+
 def wiki_notes(item: dict) -> tuple[str, dict]:
     """Recall from a fresh keep-everything wiki; return dated notes and session recall."""
     expected_ids = set(item["answer_session_ids"])
@@ -163,7 +170,8 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
                 expected.add(key)
             text = session_text(session)
             if text:
-                engine.ingest(text, source_key=key, title=key, metadata={"role": "user"})
+                metadata = {"role": "user", "date": iso_date(date)}
+                engine.ingest(text, source_key=key, title=key, metadata=metadata)
         for claim in engine.store.claims(active_only=False):
             if claim["status"] != "active":
                 engine.store.update_claim(claim["id"], {"status": "active"})
@@ -174,6 +182,7 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
             max_chars=20_000,
             offline=True,
             aggregate_limit=_CONFIG.get("aggregate_limit"),
+            as_of=iso_date(item["question_date"]),
         )
     keys = [key_of[i["source_id"]] for i in result["items"]]
     notes = "\n".join(
@@ -184,6 +193,7 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
     return notes, {
         "claims": len(result["items"]),
         "aggregate": result["aggregate"],
+        "time_window": result["time_window"],
         "recall_any@10": retrieval.get("recall_any@10"),
     }
 

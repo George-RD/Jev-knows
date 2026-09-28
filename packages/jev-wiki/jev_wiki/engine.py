@@ -9,6 +9,7 @@ import math
 import re
 from collections import Counter
 from collections.abc import Callable, Iterator
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -280,6 +281,11 @@ SEMANTIC_WEIGHT = 2.0
 MIN_SIMILARITY = 0.2
 
 
+# JEV rerank: claims scoring below this (0 Unrelated .. 3 Direct evidence, as an
+# expected value) are dropped unless recall(backfill=True) keeps them after the rest.
+MIN_RELEVANCE = 1.5
+
+
 def _order(c: dict) -> tuple:
     return -c.get("fused_score", c["context_score"]), c["id"]
 
@@ -385,6 +391,87 @@ MAX_AGGREGATE_LIMIT = 100
 def aggregation_query(query: str) -> bool:
     """True for questions answered by counting, summing, ordering or dating mentions."""
     return bool(_AGGREGATE.search(query))
+
+
+# "What did I buy 10 days ago?" names a date, not a topic: the reader has to find the one
+# note dated then among dozens of topical matches, and it often picks a topical one from
+# the wrong day (docs/aggregate-recall-default-2026-09-28.md). recall() resolves the
+# phrase against as_of and packs claims from sources dated inside the window first.
+_COUNTS = {
+    "a": 1, "an": 1, "one": 1, "a couple of": 2, "two": 2, "three": 3, "a few": 3,
+    "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12,
+}  # fmt: skip
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_RELATIVE = re.compile(
+    r"\b(?:(?P<n>\d{1,3}|" + "|".join(sorted(_COUNTS, key=len, reverse=True)) + r")\s+"
+    r"(?P<unit>day|week|month|year)s?\s+ago|(?P<yesterday>(?:the\s+)?day\s+before\s+"
+    r"yesterday|yesterday)|"
+    r"the\s+(?:last|past)\s+(?P<span>week|month|year)|last\s+"
+    r"(?P<last>week|weekend|month|year|" + "|".join(_WEEKDAYS) + r"))\b",
+    re.I,
+)
+# Days either side of the named date. People round "four weeks ago" and "two months ago".
+_SLACK = {"day": 1, "week": 3, "month": 10, "year": 45}
+_UNIT_DAYS = {"day": 1, "week": 7, "month": 30, "year": 365}
+
+
+def _as_day(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value.strip()[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def time_window(query: str, as_of: date) -> dict | None:
+    """The dates a relative phrase in ``query`` names, counted back from ``as_of``."""
+    match = _RELATIVE.search(query)
+    if not match:
+        return None
+    if match["unit"]:
+        unit = match["unit"].lower()
+        count = _COUNTS.get(match["n"].lower()) or int(match["n"])
+        target, slack = as_of - timedelta(days=count * _UNIT_DAYS[unit]), _SLACK[unit]
+        start, end = target - timedelta(days=slack), target + timedelta(days=slack)
+    elif match["yesterday"]:
+        # A day either side: today and capture times are UTC, the asker's day may not be.
+        day = as_of - timedelta(days=2 if "before" in match["yesterday"].lower() else 1)
+        start, end = day - timedelta(days=1), day + timedelta(days=1)
+    elif match["span"]:  # "in the past month": up to today.
+        start, end = as_of - timedelta(days=_UNIT_DAYS[match["span"].lower()]), as_of
+    else:
+        last = match["last"].lower()
+        if last in _WEEKDAYS or last == "weekend":
+            # The most recent such day before today, one day either side for time zones.
+            weekday = _WEEKDAYS.index("saturday" if last == "weekend" else last)
+            day = as_of - timedelta(days=(as_of.weekday() - weekday - 1) % 7 + 1)
+            start, end = (
+                day - timedelta(days=1),
+                day + timedelta(days=2 if last == "weekend" else 1),
+            )
+        elif last == "week":
+            start, end = (
+                as_of - timedelta(days=as_of.weekday() + 7),
+                as_of - timedelta(days=as_of.weekday() + 1),
+            )
+        elif last == "month":
+            end = as_of.replace(day=1) - timedelta(days=1)
+            start = end.replace(day=1)
+        else:
+            start, end = date(as_of.year - 1, 1, 1), date(as_of.year - 1, 12, 31)
+    return {"phrase": match.group(0), "start": start.isoformat(), "end": end.isoformat()}
+
+
+def source_date(source: dict) -> str | None:
+    """When a source happened: ``metadata["date"]`` if the caller gave one, else capture."""
+    day = _as_day((source.get("metadata") or {}).get("date")) or _as_day(source.get("created_at"))
+    return day.isoformat() if day else None
 
 
 CANDIDATES_PER_ASK = 8
@@ -607,6 +694,9 @@ class Engine:
         *,
         context_cost: Callable[[str], int] = len,
         aggregate_limit: int | None = None,
+        as_of: date | str | None = None,
+        min_relevance: float = MIN_RELEVANCE,
+        backfill: bool = False,
     ) -> dict:
         """Pack whole evidence blocks using the caller's trusted output-size measure.
 
@@ -615,6 +705,18 @@ class Engine:
         The ranked shortlist comes first; further candidates follow in fused order,
         after the ranker's choices and never sent to it, so JEV request size is
         unchanged. ``max_chars`` still bounds the context.
+
+        Each block and item carries its source's date (``source_date``). A query naming a
+        relative date ("10 days ago", "last Saturday") is resolved against ``as_of``
+        (default: today, UTC), and claims from sources dated in that window are packed
+        first, keeping their order among themselves. At ``limit`` or ``max_chars`` they
+        displace better-ranked claims from outside the window.
+
+        With a provider, JEV scores each shortlisted claim 0–3 and claims scoring at
+        least ``min_relevance`` come first, best score first. Without ``backfill`` the
+        rest are dropped; with it they follow in shortlist order (the order
+        ``offline=True`` returns: lexical, or hybrid with an embedder), so the rerank
+        only reorders and never loses a shortlisted candidate.
         """
         if not isinstance(query, str) or not query.strip() or len(query) > 2000:
             raise ValueError("query must contain 1–2000 characters")
@@ -626,13 +728,23 @@ class Engine:
             or not 1 <= aggregate_limit <= MAX_AGGREGATE_LIMIT
         ):
             raise ValueError(f"aggregate_limit must be 1–{MAX_AGGREGATE_LIMIT}")
+        today = _as_day(as_of) if as_of is not None else datetime.now(timezone.utc).date()
+        if today is None:
+            raise ValueError("as_of must be a date or an ISO 8601 date string")
+        window = time_window(query, today)
         aggregate = aggregate_limit is not None and aggregation_query(query)
         if aggregate:
             limit = max(limit, aggregate_limit)
+        if (
+            isinstance(min_relevance, bool)
+            or not isinstance(min_relevance, (int, float))
+            or not 0 <= min_relevance <= 3
+        ):
+            raise ValueError("min_relevance must be 0–3")
         # One unvalidated read for ranking; active_evidence (in load below) revalidates
         # every claim that is emitted, so tampered evidence still fails closed.
         current, active = self.store.recall_snapshot()
-        sources = {s["id"]: s for s in current}
+        sources = {s["id"]: {**s, "date": source_date(s)} for s in current}
         claims = [{**claim, "source": sources[claim["source_id"]]} for claim in active]
         # BM25 over active claims plus their source titles: rare, repeated query terms
         # outrank common ones, and long claims do not win on length alone. Each title
@@ -695,8 +807,10 @@ class Engine:
                     ):
                         raise ProviderError("invalid relevance score")
                     claim["relevance"] = score
-                shortlist = [c for c in shortlist if c["relevance"] >= 1.5]
-                shortlist.sort(key=lambda c: (-c["relevance"], *_order(c)))
+                promoted = [c for c in shortlist if c["relevance"] >= min_relevance]
+                promoted.sort(key=lambda c: (-c["relevance"], *_order(c)))
+                rest = [c for c in shortlist if c["relevance"] < min_relevance]
+                shortlist = promoted + rest if backfill else promoted
                 mode = "jev_reranked"
                 degraded = False
             except (ProviderError, KeyError, TypeError):
@@ -726,8 +840,9 @@ class Engine:
         def block_for(claim: dict, conflicts: list) -> str:
             citation = f"{claim['source']['path']}#chars={claim['start']}-{claim['end']}"
             flag = " CONFLICT: inspect both sources." if conflicts else ""
+            dated = f", {claim['source']['date']}" if claim["source"]["date"] else ""
             return (
-                f"\n[{len(items) + 1}] {citation} ({claim['kind']}).{flag}\n"
+                f"\n[{len(items) + 1}] {citation} ({claim['kind']}{dated}).{flag}\n"
                 + json.dumps(claim["text"], ensure_ascii=False)
                 + "\n"
             )
@@ -738,12 +853,11 @@ class Engine:
                 if claim["id"] in current:
                     yield claim, current[claim["id"]]
 
-        def pending() -> Iterator[tuple[dict, dict]]:
-            yield from load(shortlist)
+        def fill(claims: list[dict]) -> Iterator[tuple[dict, dict]]:
             # The tail loads a batch at a time, and only claims whose smallest
             # possible block still fits, so a spent budget costs no store reads.
             batch: list[dict] = []
-            for claim in tail:
+            for claim in claims:
                 if len(items) >= limit:
                     return
                 if context_cost(context + block_for(claim, [])) > max_chars:
@@ -754,6 +868,21 @@ class Engine:
                     batch = []
             if batch and len(items) < limit:
                 yield from load(batch)
+
+        def in_window(claims: list[dict], inside: bool) -> list[dict]:
+            if window is None:
+                return claims if inside else []
+            day = window["start"], window["end"]
+            return [
+                c for c in claims if (day[0] <= (c["source"]["date"] or "") <= day[1]) == inside
+            ]
+
+        def pending() -> Iterator[tuple[dict, dict]]:
+            # Inside the named window first (all of it when there is none): the
+            # ranked shortlist, then the unranked tail. Then the rest, in that order.
+            for inside in (True, False):
+                yield from load(in_window(shortlist, inside))
+                yield from fill(in_window(tail, inside))
 
         for claim, evidence in pending():
             claim.update(evidence)
@@ -782,6 +911,7 @@ class Engine:
                     "conflicts": conflicts,
                     "relevance": claim.get("relevance"),
                     "provider": claim.get("provider"),
+                    "date": claim["source"]["date"],
                 }
             )
             seen.add(digest)
@@ -795,6 +925,7 @@ class Engine:
             "mode": mode,
             "candidate_count": len(candidates),
             "aggregate": aggregate,
+            "time_window": window,
         }
 
     def maintain(self, max_pairs: int = 20) -> dict:

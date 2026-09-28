@@ -10,6 +10,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+# CLI recall gives counting, total and date questions up to this many claims; the prompt
+# hook keeps its own small budget (docs/aggregate-recall-default-2026-09-28.md).
+DEFAULT_AGGREGATE_LIMIT = 40
+
 WIKI_SCHEMA = """# Wiki memory working rules
 
 This directory is an explicitly scoped, source-backed memory wiki.
@@ -67,7 +71,19 @@ def _parser() -> argparse.ArgumentParser:
     recall.add_argument(
         "--aggregate-limit",
         type=int,
-        help="Return up to this many claims for counting, total and date questions",
+        default=DEFAULT_AGGREGATE_LIMIT,
+        help="Return up to this many claims for counting, total and date questions "
+        f"(default {DEFAULT_AGGREGATE_LIMIT}; 0 turns it off). --max-chars still bounds them",
+    )
+    recall.add_argument(
+        "--min-relevance",
+        type=float,
+        help="JEV rerank score (0–3) a claim needs to be kept or promoted (default: 1.5)",
+    )
+    recall.add_argument(
+        "--backfill",
+        action="store_true",
+        help="Keep claims below --min-relevance after the promoted ones, in --offline order",
     )
     maintain = commands.add_parser("maintain", help="Run bounded relation checks")
     maintain.add_argument("--max-pairs", type=int, default=20)
@@ -201,7 +217,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             limit=args.limit,
             max_chars=args.max_chars,
             offline=args.offline,
-            aggregate_limit=args.aggregate_limit,
+            aggregate_limit=args.aggregate_limit or None,
+            backfill=args.backfill,
+            **({} if args.min_relevance is None else {"min_relevance": args.min_relevance}),
         )
     if args.command == "maintain":
         return engine.maintain(max_pairs=args.max_pairs)
