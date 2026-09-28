@@ -50,7 +50,16 @@ to 0.28 s; the embedded hook recall stayed hybrid at every size.
 [`examples/longmemeval_offline.py`](../examples/longmemeval_offline.py), all 470
 questions:
 
-RESULTS_TABLE
+| | @1 | @3 | @5 | @10 | recall_all@10 | Preference @10 |
+|---|---|---|---|---|---|---|
+| Lexical, before | 0.832 | 0.909 | 0.940 | 0.962 | 0.864 | 0.800 |
+| Lexical, after | 0.832 | 0.909 | 0.940 | 0.962 | 0.864 | 0.800 |
+| Embeddings, before | 0.866 | 0.949 | 0.966 | 0.983 | 0.936 | 0.967 |
+| Embeddings, after | 0.866 | 0.949 | 0.966 | 0.983 | 0.936 | 0.967 |
+
+"Before" is the PR #9 merge (`6ca218e5`), scored in the same environment; every
+question type matched too. (PR #9's doc reports @3 0.951 with embeddings; that
+commit scores 0.949 here, identically before and after this change.)
 
 ## Limits
 
