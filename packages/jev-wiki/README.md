@@ -75,7 +75,9 @@ LongMemEval it raises the share of answer sentences recalled from 0.887 to 0.930
 Every recalled claim carries its source's date: the `date` you pass in ingest
 metadata (when it happened), or else when it was captured. A question naming a
 relative date ("what did I buy 10 days ago", "last Saturday") packs the claims from
-that window first.
+that window first, and CLI `recall` also adds the claims from sources dated then that
+ranking left out, outside `--limit` (`--no-window-claims` turns this off;
+[window claims](docs/window-claims-2026-09-28.md)).
 
 Re-ingest a changed document with the **same source key** to replace its current
 revision. Independent sources need independent keys: capture order does not resolve

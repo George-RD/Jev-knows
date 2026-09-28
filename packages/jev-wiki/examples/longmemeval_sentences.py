@@ -130,6 +130,7 @@ def score(task: tuple[dict, dict]) -> dict:
             aggregate_limit=_CONFIG["aggregate_limit"],
             as_of=iso_date(item["question_date"]),
             neighbours=_CONFIG["neighbours"],
+            window_claims=_CONFIG["window_claims"],
         )
     recalled = [(sid_of[key_of[i["source_id"]]], _normal(i["text"])) for i in result["items"]]
     chats = {sid for sid, _ in recalled}
@@ -187,6 +188,7 @@ def main() -> int:
     parser.add_argument("--max-chars", type=int, default=20_000)
     parser.add_argument("--aggregate-limit", type=int)
     parser.add_argument("--neighbours", action="store_true")
+    parser.add_argument("--window-claims", action="store_true")
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     parser.add_argument("--output", help="write per-question rows here (JSON lines)")
     args = parser.parse_args()
@@ -201,6 +203,7 @@ def main() -> int:
         "max_chars": args.max_chars,
         "aggregate_limit": args.aggregate_limit,
         "neighbours": args.neighbours,
+        "window_claims": args.window_claims,
     }
     _CONFIG.update(config)
     labels = {}

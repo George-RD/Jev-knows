@@ -83,6 +83,14 @@ def _parser() -> argparse.ArgumentParser:
         "default outside --limit, in at most a quarter of --max-chars",
     )
     recall.add_argument(
+        "--no-window-claims",
+        dest="window_claims",
+        action="store_false",
+        help='For a question naming a date ("10 days ago"), leave out the claims from '
+        "sources dated then that ranking missed, which recall adds by default outside "
+        "--limit, in at most a quarter of --max-chars",
+    )
+    recall.add_argument(
         "--min-relevance",
         type=float,
         help="JEV rerank score (0–3) a claim needs to be kept or promoted (default: 1.5)",
@@ -227,6 +235,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             aggregate_limit=args.aggregate_limit or None,
             backfill=args.backfill,
             neighbours=args.neighbours,
+            window_claims=args.window_claims,
             **({} if args.min_relevance is None else {"min_relevance": args.min_relevance}),
         )
     if args.command == "maintain":
