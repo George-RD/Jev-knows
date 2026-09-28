@@ -489,7 +489,9 @@ def main() -> int:
             "samples": 1,
         }
         if {k: earlier["config"].get(k, before_live.get(k)) for k in resumed} != resumed:
-            parser.error("--resume report was made with a different mode, models, embedder or sample count")
+            parser.error(
+                "--resume report was made with a different mode, models, embedder or samples"
+            )
         done = {r["question_id"]: r for r in earlier["rows"] if "correct" in r}
     todo = [item for item in items if item["question_id"] not in done]
     started = time.perf_counter()
