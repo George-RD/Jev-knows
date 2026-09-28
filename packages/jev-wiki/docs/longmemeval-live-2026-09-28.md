@@ -77,5 +77,6 @@ recall is lost once intake keeps the evidence.
 The response cache was written to the shared project folder,
 `/mnt/project-files/jev-cache/longmemeval` (3,716 entries, 12.8 MB), so a rerun of this
 exact sweep, including the added thresholds, replays from the cache with no paid
-calls. Adding new thresholds costs only their rerank asks; any intake change misses
+calls. Checked: a second run made 0 paid requests (3,832 hits) and produced an
+identical summary. Adding new thresholds costs only their rerank asks; any intake change misses
 the cache and pays full price.
