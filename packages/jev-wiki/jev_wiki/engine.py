@@ -16,16 +16,22 @@ from .bm25 import STOPWORDS, bm25_from_stats, query_terms, term_stats
 from .provider import ProviderError
 from .store import WikiStore
 
-RUBRIC_VERSION = "wiki-v2"  # Intake: candidate boundaries and keep/kind/topic questions.
+RUBRIC_VERSION = "wiki-v3"  # Intake: candidate boundaries and keep/kind/topic questions.
 # Relation checks did not change with intake; bumping this re-checks every pair.
 RELATION_RUBRIC_VERSION = "wiki-v1"
+# Intake rubrics whose stored keep/kind answers the current gate can replay. wiki-v3 only
+# reworded the kind question, so wiki-v2 answers still mean what the gate expects.
+RECLASSIFIABLE_RUBRICS = frozenset({"wiki-v2", RUBRIC_VERSION})
 KINDS = {
     "fact": "An asserted fact about the world; not independently verified",
     "decision": "A decision actually made, with its stated scope",
     "preference": "An explicit preference, constraint, or working style",
     "procedure": "A reusable method or lesson",
     "commitment": "An explicit commitment or next action; not a scheduler",
-    "uncertain": "Hypothesis, speculation, question, or ambiguous statement",
+    "uncertain": (
+        "Hypothesis, speculation, or ambiguous statement; a question or request only when "
+        "it states nothing definite about the speaker or their world"
+    ),
 }
 TOPICS = {
     "people": "People and relationships",
@@ -469,7 +475,11 @@ class Engine:
                         KEEP,
                     )
                     questions[f"kind_{i}"] = _choice(
-                        prefix + "What kind of assertion is it?", KINDS
+                        prefix + "What kind of assertion is it? Judge what it states, not "
+                        "its sentence form: a question or request that mentions the "
+                        "speaker's possessions, plans, habits, or situation asserts that "
+                        "fact.",
+                        KINDS,
                     )
                     questions[f"topic_{i}"] = _choice(
                         prefix + "Choose its broad wiki topic.", TOPICS
@@ -538,8 +548,9 @@ class Engine:
         Completed sources are never re-asked, so a gate change (such as the kind gate
         reading ``P(uncertain)``) would otherwise reach only new sources. This replays
         the stored decisions of claims intake left in review. It skips claims with a
-        review reason (superseded or forgotten sources), claims from an older rubric,
-        and any claim a caller has already updated, so a manual demotion stands.
+        review reason (superseded or forgotten sources), claims from a rubric outside
+        ``RECLASSIFIABLE_RUBRICS``, and any claim a caller has already updated, so a
+        manual demotion stands.
         """
 
         def admits(claim: dict, source: dict) -> bool:
@@ -547,7 +558,7 @@ class Engine:
             role = source.get("metadata", {}).get("role", "document")
             return activates(decisions.get("keep") or {}, decisions.get("kind") or {}, role)
 
-        promoted = len(self.store.promote_review_claims(RUBRIC_VERSION, admits))
+        promoted = len(self.store.promote_review_claims(RECLASSIFIABLE_RUBRICS, admits))
         if promoted:
             self.store.render()
         return {"promoted": promoted}

@@ -18,7 +18,7 @@ import re
 import stat
 import tempfile
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -509,12 +509,12 @@ class WikiStore:
             self._save(state)
 
     def promote_review_claims(
-        self, rubric_version: str, admits: Callable[[dict, dict], bool]
+        self, rubric_versions: Collection[str], admits: Callable[[dict, dict], bool]
     ) -> list[str]:
         """Activate intake-review claims of current sources that ``admits(claim, source)``.
 
         Eligibility is decided under the lock, so a concurrent update always wins:
-        claims with a review reason, from another rubric, or already set by a caller
+        claims with a review reason, from a rubric outside ``rubric_versions``, or already set by a caller
         (``update_claim`` or a curated ``put_claims``) are never promoted. Only current sources'
         raw text is read. Returns the promoted claim ids.
         """
@@ -532,7 +532,7 @@ class WikiStore:
                 if (
                     claim["status"] != "review"
                     or claim.get("review_reason")
-                    or claim.get("rubric_version") != rubric_version
+                    or claim.get("rubric_version") not in rubric_versions
                     or claim_id in updated
                     or not self._current(state, source)
                     or not admits(copy.deepcopy(claim), copy.deepcopy(source))
