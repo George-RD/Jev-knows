@@ -33,12 +33,16 @@ https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned first):
     python packages/jev-wiki/examples/longmemeval.py --data longmemeval_s_cleaned.json \
         --per-type 5 --output /tmp/lme-report.json
 
-JEV responses are cached on disk (``--cache-dir``, default under ``~/.cache/jev-wiki``)
-keyed on the endpoint, pinned model and exact request, so a repeat run only pays for
+JEV responses are cached on disk, one file per request, keyed on the endpoint, pinned model and exact request, so a repeat run only pays for
 requests it has not sent before. A changed prompt, rubric, source text or model is a
 different key. Model aliases (``jev-latest``) are never cached. A cached rerun replays
 the earlier answers; pass ``--no-cache`` to sample JEV afresh, or ``--clear-cache`` to
-start empty. The report's ``cache`` block counts hits, misses (paid requests) and the
+start empty. The cache directory is ``--cache-dir``, else ``JEV_WIKI_CACHE_DIR``, else
+``/mnt/project-files/jev-cache/longmemeval`` when that shared folder exists (so every
+session reuses and extends one cache), else ``~/.cache/jev-wiki/longmemeval``.
+Concurrent writers are safe: entries are written atomically and a key's content is
+fixed, so the last writer wins harmlessly. ``--clear-cache`` on a shared folder
+empties it for everyone. The report's ``cache`` block counts hits, misses (paid requests) and the
 input tokens the hits saved.
 """
 
@@ -350,7 +354,16 @@ def summarize(rows: list[dict]) -> dict:
     }
 
 
+# Folder shared by every session of the Jev-Knows project; it outlives any one container.
+SHARED_FOLDER = Path("/mnt/project-files")
+
+
 def default_cache_dir() -> Path:
+    """``JEV_WIKI_CACHE_DIR``, else the shared project folder, else the user cache."""
+    if os.environ.get("JEV_WIKI_CACHE_DIR"):
+        return Path(os.environ["JEV_WIKI_CACHE_DIR"])
+    if SHARED_FOLDER.is_dir():
+        return SHARED_FOLDER / "jev-cache" / "longmemeval"
     base = os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
     return Path(base) / "jev-wiki" / "longmemeval"
 
