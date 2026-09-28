@@ -69,6 +69,16 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         help="Return up to this many claims for counting, total and date questions",
     )
+    recall.add_argument(
+        "--min-relevance",
+        type=float,
+        help="JEV rerank score (0–3) a claim needs to be kept or promoted (default: 1.5)",
+    )
+    recall.add_argument(
+        "--backfill",
+        action="store_true",
+        help="Keep claims below --min-relevance after the promoted ones, in --offline order",
+    )
     maintain = commands.add_parser("maintain", help="Run bounded relation checks")
     maintain.add_argument("--max-pairs", type=int, default=20)
     commands.add_parser("lint", help="Check provenance and wiki integrity")
@@ -202,6 +212,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             max_chars=args.max_chars,
             offline=args.offline,
             aggregate_limit=args.aggregate_limit,
+            backfill=args.backfill,
+            **({} if args.min_relevance is None else {"min_relevance": args.min_relevance}),
         )
     if args.command == "maintain":
         return engine.maintain(max_pairs=args.max_pairs)
