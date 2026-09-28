@@ -478,6 +478,16 @@ MIN_NEIGHBOURS = 5
 NEIGHBOUR_SHARE = 4
 
 
+# A question that names a date may share no words with the one sentence that answers
+# it: "What kitchen appliance did I buy 10 days ago?" against "I just got a smoker
+# today" in a chat about BBQ sauce. recall(window_claims=True) adds claims from sources
+# dated in the named window that ranking left out, most query-similar first, after the
+# window's ranked claims and outside the claim limit: up to MAX_WINDOW_CLAIMS in a
+# quarter of max_chars (docs/window-claims-2026-09-28.md).
+MAX_WINDOW_CLAIMS = 20
+WINDOW_SHARE = 4
+
+
 def _adjacent(claims: list[dict]) -> dict[str, list[dict]]:
     """Each claim's next and previous claim in its source, by position, next first."""
     by_source: dict[str, list[dict]] = {}
@@ -723,6 +733,7 @@ class Engine:
         min_relevance: float = MIN_RELEVANCE,
         backfill: bool = False,
         neighbours: bool = False,
+        window_claims: bool = False,
     ) -> dict:
         """Pack whole evidence blocks using the caller's trusted output-size measure.
 
@@ -749,6 +760,12 @@ class Engine:
         toward the limit; up to ``max(MIN_NEIGHBOURS, limit // 2)`` of them are added,
         using at most a quarter of ``max_chars``. A claim the ranker scored below the
         cut is never added as a neighbour.
+
+        With ``window_claims`` and a query naming a date, claims from sources dated in
+        that window that ranking left out follow the window's ranked claims, most
+        similar to the query first (source order without an embedder), marked
+        ``in_window``. They don't count toward the limit either: up to
+        ``MAX_WINDOW_CLAIMS``, in at most a quarter of ``max_chars``.
         """
         if not isinstance(query, str) or not query.strip() or len(query) > 2000:
             raise ValueError("query must contain 1–2000 characters")
@@ -916,11 +933,34 @@ class Engine:
             for inside in (True, False):
                 yield from load(in_window(shortlist, inside))
                 yield from fill(in_window(tail, inside))
+                if inside and dated:
+                    yield from load(dated)
 
         adjacent = _adjacent(claims) if neighbours else {}
         # What the ranker scored below the cut stays out, as in the aggregate tail.
         kept_ids = {c["id"] for c in shortlist}
         ranked_out = {c["text"] for c in sent if c["id"] not in kept_ids}
+        dated: list[dict] = []
+        if window_claims and window is not None:
+            taken = kept_ids | {c["id"] for c in sent} | {c["id"] for c in tail}
+            similarity = dict(zip((c["id"] for c in claims), similarities or ()))
+            dated = sorted(
+                (
+                    {**c}
+                    for c in claims
+                    if c["id"] not in taken
+                    and c["text"] not in ranked_out
+                    and window["start"] <= (c["source"]["date"] or "") <= window["end"]
+                ),
+                key=lambda c: (
+                    -similarity.get(c["id"], 0.0),
+                    c["source"]["date"] or "",
+                    c["source_id"],
+                    c["start"],
+                ),
+            )[: 4 * MAX_WINDOW_CLAIMS]  # Room for a few that no longer fit or validate.
+        dated_ids = {c["id"] for c in dated}
+        window_spare = {"claims": MAX_WINDOW_CLAIMS, "chars": max_chars // WINDOW_SHARE}
         spare = {"claims": max(MIN_NEIGHBOURS, limit // 2), "chars": max_chars // NEIGHBOUR_SHARE}
         packed: set[str] = set()
         # One store read for the neighbours of the claims likely to be packed; the
@@ -983,6 +1023,15 @@ class Engine:
             return True
 
         for claim, evidence in pending():
+            if claim["id"] in dated_ids:
+                if window_spare["claims"] > 0:
+                    before = context_cost(context)
+                    block = context_cost(context + block_for(claim, [])) - before
+                    if block <= window_spare["chars"] and add(claim, evidence):
+                        items[-1]["in_window"] = True
+                        window_spare["claims"] -= 1
+                        window_spare["chars"] -= context_cost(context) - before
+                continue
             if not add(claim, evidence):
                 continue
             counted += 1
@@ -1008,6 +1057,7 @@ class Engine:
             "aggregate": aggregate,
             "time_window": window,
             "neighbours": sum("neighbour_of" in i for i in items),
+            "window_claims": sum("in_window" in i for i in items),
         }
 
     def maintain(self, max_pairs: int = 20) -> dict:

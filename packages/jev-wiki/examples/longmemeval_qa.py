@@ -18,7 +18,8 @@ Context modes:
   ``--aggregate-limit N`` lets counting and date questions recall up to N claims. Each
   chat is ingested with its date and recall runs as of the question's date, so "two
   weeks ago" resolves the way it would have that day. ``--neighbours`` adds the claims
-  next to each recalled claim (``Engine.recall(neighbours=True)``).
+  next to each recalled claim (``Engine.recall(neighbours=True)``), and
+  ``--window-claims`` the left-out claims from chats dated in a named window.
   ``--live`` instead runs the shipped pipeline: JEV intake with the shipped keep gate, then
   recall with the JEV rerank at ``--min-relevance``. That spends TypeSafe credits, so it
   goes through the same shared response cache as ``longmemeval.py`` (``--cache-dir``);
@@ -228,6 +229,7 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
             aggregate_limit=_CONFIG.get("aggregate_limit"),
             as_of=iso_date(item["question_date"]),
             neighbours=bool(_CONFIG.get("neighbours")),
+            window_claims=bool(_CONFIG.get("window_claims")),
             min_relevance=MIN_RELEVANCE if not live else _CONFIG["min_relevance"],
         )
     keys = [key_of[i["source_id"]] for i in result["items"]]
@@ -241,6 +243,7 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
         "aggregate": result["aggregate"],
         "time_window": result["time_window"],
         "neighbours": result["neighbours"],
+        "window_claims": result["window_claims"],
         "recall_any@10": retrieval.get("recall_any@10"),
     }
     if live:
@@ -371,6 +374,11 @@ def main() -> int:
         help="wiki mode: add the claims next to each recalled claim",
     )
     parser.add_argument(
+        "--window-claims",
+        action="store_true",
+        help="wiki mode: add left-out claims from chats dated in the question's window",
+    )
+    parser.add_argument(
         "--save-notes", action="store_true", help="keep each question's notes in its row"
     )
     parser.add_argument(
@@ -414,6 +422,7 @@ def main() -> int:
         "endpoint": args.endpoint,
         "aggregate_limit": args.aggregate_limit,
         "neighbours": args.neighbours,
+        "window_claims": args.window_claims,
         "save_notes": args.save_notes,
         "live": args.live,
         "min_relevance": args.min_relevance if args.live else None,
