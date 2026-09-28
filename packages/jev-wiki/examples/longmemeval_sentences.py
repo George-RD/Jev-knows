@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from jev_wiki.engine import Engine, candidate_spans  # noqa: E402
 from longmemeval import session_text  # noqa: E402
 from longmemeval_offline import KeepEverything, _embedder  # noqa: E402
-from longmemeval_qa import _CALL_ERRORS, _CONFIG, chat, iso_date  # noqa: E402
+from longmemeval_qa import _CALL_ERRORS, _CONFIG, _init, chat, iso_date  # noqa: E402
 
 LABEL_PROMPT = """A user asked a question about their own past chats. Below are numbered \
 sentences the user wrote in the chats that contain the answer.
@@ -212,7 +212,7 @@ def main() -> int:
                 labels[row["question_id"]] = row
                 out.write(json.dumps(row, ensure_ascii=False) + "\n")
     tasks = [(i, labels[i["question_id"]]) for i in items if i["question_id"] in labels]
-    with ProcessPoolExecutor(args.workers, initializer=_CONFIG.update, initargs=(config,)) as pool:
+    with ProcessPoolExecutor(args.workers, initializer=_init, initargs=(config,)) as pool:
         rows = list(pool.map(score, tasks, chunksize=4))
     print(json.dumps({"config": config, "summary": summarize(rows)}, indent=1))
     if args.output:
