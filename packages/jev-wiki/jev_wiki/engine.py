@@ -481,9 +481,9 @@ NEIGHBOUR_SHARE = 4
 # A question that names a date may share no words with the one sentence that answers
 # it: "What kitchen appliance did I buy 10 days ago?" against "I just got a smoker
 # today" in a chat about BBQ sauce. recall(window_claims=True) adds claims from sources
-# dated in the named window that ranking left out, most query-similar first, after the
-# window's ranked claims and outside the claim limit: up to MAX_WINDOW_CLAIMS in a
-# quarter of max_chars (docs/window-claims-2026-09-28.md).
+# dated in the named window that ranking left out, most query-similar first, after all
+# ranked claims and outside the claim limit: up to MAX_WINDOW_CLAIMS in a quarter of
+# max_chars (docs/window-claims-2026-09-28.md).
 MAX_WINDOW_CLAIMS = 20
 WINDOW_SHARE = 4
 
@@ -762,8 +762,8 @@ class Engine:
         cut is never added as a neighbour.
 
         With ``window_claims`` and a query naming a date, claims from sources dated in
-        that window that ranking left out follow the window's ranked claims, most
-        similar to the query first (source order without an embedder), marked
+        that window that ranking left out follow the ranked claims, in the room they
+        left, most similar to the query first (source order without an embedder), marked
         ``in_window``. They don't count toward the limit either: up to
         ``MAX_WINDOW_CLAIMS``, in at most a quarter of ``max_chars``.
         """
@@ -933,8 +933,6 @@ class Engine:
             for inside in (True, False):
                 yield from load(in_window(shortlist, inside))
                 yield from fill(in_window(tail, inside))
-                if inside and dated:
-                    yield from load(dated)
 
         adjacent = _adjacent(claims) if neighbours else {}
         # What the ranker scored below the cut stays out, as in the aggregate tail.
@@ -959,7 +957,6 @@ class Engine:
                     c["start"],
                 ),
             )[: 4 * MAX_WINDOW_CLAIMS]  # Room for a few that no longer fit or validate.
-        dated_ids = {c["id"] for c in dated}
         window_spare = {"claims": MAX_WINDOW_CLAIMS, "chars": max_chars // WINDOW_SHARE}
         spare = {"claims": max(MIN_NEIGHBOURS, limit // 2), "chars": max_chars // NEIGHBOUR_SHARE}
         packed: set[str] = set()
@@ -1023,15 +1020,6 @@ class Engine:
             return True
 
         for claim, evidence in pending():
-            if claim["id"] in dated_ids:
-                if window_spare["claims"] > 0:
-                    before = context_cost(context)
-                    block = context_cost(context + block_for(claim, [])) - before
-                    if block <= window_spare["chars"] and add(claim, evidence):
-                        items[-1]["in_window"] = True
-                        window_spare["claims"] -= 1
-                        window_spare["chars"] -= context_cost(context) - before
-                continue
             if not add(claim, evidence):
                 continue
             counted += 1
@@ -1047,6 +1035,19 @@ class Engine:
                     add(neighbour, current, anchor=claim["id"])
             if counted >= limit:
                 break
+        # Window claims last, so they only use room the ranked claims left.
+        for claim, evidence in load(dated):
+            if window_spare["claims"] <= 0:
+                break
+            claim.update(evidence)
+            conflicts = [r for r in claim.get("relations", []) if r.get("type") == "conflict"]
+            before = context_cost(context)
+            if context_cost(context + block_for(claim, conflicts)) - before > window_spare["chars"]:
+                continue
+            if add(claim, evidence):
+                items[-1]["in_window"] = True
+                window_spare["claims"] -= 1
+                window_spare["chars"] -= context_cost(context) - before
         return {
             "query": query,
             "items": items,

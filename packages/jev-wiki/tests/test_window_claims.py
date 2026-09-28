@@ -52,6 +52,16 @@ class WindowClaimTests(unittest.TestCase):
             [i["text"] for i in result["items"] if "in_window" not in i],
         )
 
+    def test_ranked_claims_keep_their_room(self):
+        appliances = [
+            f"Kitchen appliance {i}: I bought a blender for the office." for i in range(8)
+        ]
+        self.engine.ingest("\n\n".join(appliances), "shop", metadata={"date": "2022-01-01"})
+        plain = self.recall(limit=5, max_chars=1_000)
+        dated = self.recall(limit=5, max_chars=1_000, window_claims=True)
+        ranked = [i["id"] for i in dated["items"] if "in_window" not in i]
+        self.assertEqual(ranked, [i["id"] for i in plain["items"]])
+
     def test_nothing_is_added_without_a_named_date(self):
         result = self.engine.recall(
             "What kitchen appliance did I buy?", offline=True, as_of=AS_OF, window_claims=True
