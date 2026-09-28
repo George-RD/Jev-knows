@@ -773,12 +773,11 @@ class Engine:
             or not 0 <= min_relevance <= 3
         ):
             raise ValueError("min_relevance must be 0–3")
-        sources = {s["id"]: {**s, "date": source_date(s)} for s in self.store.sources()}
-        claims = [
-            {**claim, "source": sources[claim["source_id"]]}
-            for claim in self.store.claims()
-            if claim["source_id"] in sources
-        ]
+        # One unvalidated read for ranking; active_evidence (in load below) revalidates
+        # every claim that is emitted, so tampered evidence still fails closed.
+        current, active = self.store.recall_snapshot()
+        sources = {s["id"]: {**s, "date": source_date(s)} for s in current}
+        claims = [{**claim, "source": sources[claim["source_id"]]} for claim in active]
         # BM25 over active claims plus their source titles: rare, repeated query terms
         # outrank common ones, and long claims do not win on length alone. Each title
         # is tokenized once per source and never copied into its claims. Each matching

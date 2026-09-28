@@ -82,6 +82,7 @@ class WikiStore:
                 raise ValueError(f"Store path must not contain a symlink: {part}")
         candidate.mkdir(parents=True, exist_ok=True)
         self.root = candidate.resolve()
+        self._shared: tuple[tuple, dict] | None = None
         with self._locked():
             if not self._path("state.json").exists():
                 self._write("state.json", _json_bytes(self._empty()))
@@ -153,6 +154,25 @@ class WikiStore:
 
     def _load(self) -> dict:
         state = json.loads(self._read("state.json"))
+        return self._checked(state)
+
+    def _load_shared(self) -> dict:
+        """Parsed state for read-only callers, reused while the file is unchanged.
+
+        Every write replaces ``state.json`` with a new file, so an unchanged identity
+        means unchanged content. Callers must not mutate the result. Recall reads the
+        state twice (rank, then revalidate), and at 10,000 claims each parse is 0.1 s.
+        """
+        info = os.stat(self._path("state.json"), follow_symlinks=False)
+        key = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        cached = self._shared
+        if cached is None or cached[0] != key:
+            cached = (key, self._load())
+            self._shared = cached
+        return cached[1]
+
+    @staticmethod
+    def _checked(state: Any) -> dict:
         if not isinstance(state, dict) or state.get("schema_version") != 1:
             raise ValueError("Unsupported or corrupt wiki state")
         for field in ("sources", "claims", "tombstones"):
@@ -439,10 +459,43 @@ class WikiStore:
                 return [self._filtered_claim(claim, active_ids) for claim in values]
             return copy.deepcopy(values)
 
+    def recall_snapshot(self) -> tuple[list[dict], list[dict]]:
+        """Current sources and active claims from one read, for ranking only.
+
+        Unlike ``claims()``, this skips reading and hashing raw sources and
+        revalidating every claim, which dominate large reads. Each source and claim
+        is a shallow copy of the shared parse (``_load_shared``): callers may set keys
+        on them but must not mutate nested values. Callers must pass whatever they emit
+        through ``active_evidence``, which revalidates exactly those claims and fails
+        closed.
+        """
+        with self._locked():
+            state = self._load_shared()
+            sources = [s for s in state["sources"].values() if self._current(state, s)]
+            current = {source["id"] for source in sources}
+            values = [
+                claim
+                for claim in state["claims"].values()
+                if claim["status"] == "active" and claim["source_id"] in current
+            ]
+            active_ids = {claim["id"] for claim in values}
+            # Shallow copies: the parsed state is shared with active_evidence.
+            return [dict(source) for source in sources], [
+                {
+                    **claim,
+                    "relations": [
+                        relation
+                        for relation in claim["relations"]
+                        if relation.get("target") in active_ids
+                    ],
+                }
+                for claim in values
+            ]
+
     def active_evidence(self, claim_ids: list[str]) -> dict[str, dict]:
         """Revalidate selected evidence atomically after a potentially slow ranker."""
         with self._locked():
-            state = self._load()
+            state = self._load_shared()
             result = {}
             raw = {}
             active_ids = self._active_ids(state)
