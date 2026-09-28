@@ -49,6 +49,13 @@ reranking. `recall --offline` and the
 prompt hook stay lexical: loading the model takes about a second, over the hook's
 0.75 s budget.
 
+Questions that count, total, order or date events ("how many weddings did I go to",
+"which did I start first") need every mention, not the best few. `recall
+--aggregate-limit 60` lets such questions return up to 60 claims; the ranked shortlist
+comes first and the JEV request is unchanged. It is off by default. On LongMemEval it
+lifts answer accuracy from 0.754 to 0.778
+([aggregate recall](docs/aggregate-recall-2026-09-28.md)).
+
 Re-ingest a changed document with the **same source key** to replace its current
 revision. Independent sources need independent keys: capture order does not resolve
 their factual disagreements.

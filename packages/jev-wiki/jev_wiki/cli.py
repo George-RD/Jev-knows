@@ -63,6 +63,11 @@ def _parser() -> argparse.ArgumentParser:
     recall.add_argument("--limit", type=int, default=5)
     recall.add_argument("--max-chars", type=int, default=6_000)
     recall.add_argument("--offline", action="store_true", help="Use lexical retrieval only")
+    recall.add_argument(
+        "--aggregate-limit",
+        type=int,
+        help="Return up to this many claims for counting, total and date questions",
+    )
     maintain = commands.add_parser("maintain", help="Run bounded relation checks")
     maintain.add_argument("--max-pairs", type=int, default=20)
     commands.add_parser("lint", help="Check provenance and wiki integrity")
@@ -181,7 +186,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return result
     if args.command == "recall":
         return engine.recall(
-            args.query, limit=args.limit, max_chars=args.max_chars, offline=args.offline
+            args.query,
+            limit=args.limit,
+            max_chars=args.max_chars,
+            offline=args.offline,
+            aggregate_limit=args.aggregate_limit,
         )
     if args.command == "maintain":
         return engine.maintain(max_pairs=args.max_pairs)

@@ -15,6 +15,7 @@ Context modes:
 - ``wiki``: the claims ``Engine.recall(offline=True)`` returns (up to 20, 20k chars), each
   prefixed with the date of the chat it came from. An agent's memory knows when a note was
   captured; LongMemEval's temporal questions are unanswerable without it.
+  ``--aggregate-limit N`` lets counting and date questions recall up to N claims.
 - ``oracle``: the user turns of the labelled evidence sessions, dated. The ceiling for a
   store that keeps only user turns; the gap to ``wiki`` is what recall and claim
   splitting lose.
@@ -167,7 +168,13 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
             if claim["status"] != "active":
                 engine.store.update_claim(claim["id"], {"status": "active"})
         key_of = {s["id"]: s["source_key"] for s in engine.store.sources()}
-        result = engine.recall(item["question"], limit=20, max_chars=20_000, offline=True)
+        result = engine.recall(
+            item["question"],
+            limit=20,
+            max_chars=20_000,
+            offline=True,
+            aggregate_limit=_CONFIG.get("aggregate_limit"),
+        )
     keys = [key_of[i["source_id"]] for i in result["items"]]
     notes = "\n".join(
         f"[{n}] (chat date: {date_of[key]}) {json.dumps(i['text'], ensure_ascii=False)}"
@@ -176,6 +183,7 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
     retrieval = score_sessions(keys, expected) if expected else {}
     return notes, {
         "claims": len(result["items"]),
+        "aggregate": result["aggregate"],
         "recall_any@10": retrieval.get("recall_any@10"),
     }
 
@@ -266,6 +274,11 @@ def main() -> int:
     parser.add_argument("--judge", default="glm-5.3")
     parser.add_argument("--endpoint", default="https://ollama.com/api/chat")
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument(
+        "--aggregate-limit",
+        type=int,
+        help="wiki mode: recall up to this many claims for counting and date questions",
+    )
     parser.add_argument("--output", help="write the full report (summary and rows) here")
     parser.add_argument(
         "--resume", help="an earlier --output report: keep its graded rows, rerun the rest"
@@ -280,6 +293,7 @@ def main() -> int:
         "reader": args.reader,
         "judge": args.judge,
         "endpoint": args.endpoint,
+        "aggregate_limit": args.aggregate_limit,
     }
     done = {}
     if args.resume:
