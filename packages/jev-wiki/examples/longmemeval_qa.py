@@ -61,8 +61,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from jev_wiki import __version__  # noqa: E402
 from jev_wiki.engine import MIN_RELEVANCE, Engine  # noqa: E402
 from jev_wiki.provider import JevProvider, ProviderError  # noqa: E402
-from longmemeval import default_cache_dir, score_sessions, select, session_text  # noqa: E402
-from longmemeval_offline import KeepEverything, _embedder  # noqa: E402
+from jev_wiki.embedding import ENV_VAR  # noqa: E402
+from longmemeval import (  # noqa: E402
+    default_cache_dir,
+    embedder_for,
+    score_sessions,
+    select,
+    session_text,
+)
+from longmemeval_offline import KeepEverything  # noqa: E402
 
 MODES = ("wiki", "oracle", "none")
 
@@ -125,6 +132,14 @@ _CALL_ERRORS = (OSError, http.client.HTTPException, KeyError, json.JSONDecodeErr
 class IntakeIncomplete(RuntimeError):
     """Live intake left a session unprocessed; the store would turn it into a miss."""
 
+    def __init__(self, message: str, telemetry: dict):
+        super().__init__(message)
+        self.telemetry = telemetry  # what the failed intake already spent
+
+
+def embedding_model() -> str | None:
+    return os.environ.get(ENV_VAR, "").strip() or None
+
 
 def chat(model: str, prompt: str) -> str:
     """One non-streaming /api/chat call, retried on transient failures."""
@@ -180,7 +195,8 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
     )
     statuses: dict[str, int] = defaultdict(int)
     with tempfile.TemporaryDirectory(prefix="jev-lme-qa-") as root:
-        engine = Engine(root, provider, embedder=_embedder())
+        # Strict: a model that fails to load must fail the run, not score lexical recall.
+        engine = Engine(root, provider, embedder=embedder_for(embedding_model()))
         for index, (sid, date, session) in enumerate(
             zip(item["haystack_session_ids"], item["haystack_dates"], item["haystack_sessions"])
         ):
@@ -194,7 +210,9 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
                 result = engine.ingest(text, source_key=key, title=key, metadata=metadata)
                 statuses[result["status"]] += 1
         if live and set(statuses) - {"complete"}:
-            raise IntakeIncomplete(f"ingestion incomplete: {dict(statuses)}")
+            raise IntakeIncomplete(
+                f"ingestion incomplete: {dict(statuses)}", dict(provider.telemetry)
+            )
         if not live:
             for claim in engine.store.claims(active_only=False):
                 if claim["status"] != "active":
@@ -259,6 +277,8 @@ def run_question(item: dict) -> dict:
             notes, stats = wiki_notes(item)
         except (IntakeIncomplete, ProviderError) as exc:
             row["error"] = f"{type(exc).__name__}: {exc}"[:300]
+            if isinstance(exc, IntakeIncomplete):
+                row["telemetry"] = exc.telemetry
             return row
         row.update(stats)
     elif mode == "oracle":
@@ -306,14 +326,13 @@ def summarize(rows: list[dict]) -> dict:
         for key, value in row.get("telemetry", {}).items():
             telemetry[key] += value
     if telemetry:
+        returned = [r["claims"] for r in rows if "claims" in r]
         out["jev"] = {
             "paid_requests": telemetry["requests"],
             "cache_hits": telemetry["cache_hits"],
             "input_tokens": telemetry["input_tokens"],
             "degraded_recalls": sum(bool(r.get("degraded")) for r in rows),
-            "claims_returned_mean": round(
-                statistics.mean(r["claims"] for r in rows if "claims" in r), 1
-            ),
+            "claims_returned_mean": (round(statistics.mean(returned), 1) if returned else None),
         }
     retrieved = [r for r in rows if r.get("recall_any@10") is not None and "correct" in r]
     if retrieved:
@@ -367,6 +386,11 @@ def main() -> int:
 
     if args.live and args.mode != "wiki":
         parser.error("--live needs --mode wiki")
+    if not 0 <= args.min_relevance <= 3:
+        parser.error("--min-relevance must be 0–3, JEV's rerank score range")
+    if args.mode == "wiki" and embedding_model():
+        # Load once here so a missing extra or model fails before any paid request.
+        embedder_for(embedding_model())
     items = json.loads(Path(args.data).read_text())
     per_type = args.per_type or len(items)
     items = select(items, per_type, args.seed, include_abstention=not args.no_abstention)
@@ -384,7 +408,7 @@ def main() -> int:
     done = {}
     if args.resume:
         earlier = json.loads(Path(args.resume).read_text())
-        resumed = {**config, "embedding_model": os.environ.get("JEV_WIKI_EMBEDDING_MODEL")}
+        resumed = {**config, "embedding_model": embedding_model()}
         del resumed["cache_dir"]  # where responses are cached does not change them
         # Reports from before --live ran offline.
         before_live = {"live": False}
@@ -406,7 +430,7 @@ def main() -> int:
             "per_type": args.per_type,
             "seed": args.seed,
             "abstention": not args.no_abstention,
-            "embedding_model": os.environ.get("JEV_WIKI_EMBEDDING_MODEL"),
+            "embedding_model": embedding_model(),
         },
         "seconds": round(time.perf_counter() - started, 1),
         "summary": summarize(rows),
