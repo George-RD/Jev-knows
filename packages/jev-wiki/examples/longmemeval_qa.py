@@ -16,6 +16,10 @@ Context modes:
   prefixed with the date of the chat it came from. An agent's memory knows when a note was
   captured; LongMemEval's temporal questions are unanswerable without it.
   ``--aggregate-limit N`` lets counting and date questions recall up to N claims.
+  ``--live`` instead runs the shipped pipeline: JEV intake with the shipped keep gate, then
+  recall with the JEV rerank at ``--min-relevance``. That spends TypeSafe credits, so it
+  goes through the same shared response cache as ``longmemeval.py`` (``--cache-dir``);
+  a question that intake could not complete is an error row, not a wrong answer.
 - ``oracle``: the user turns of the labelled evidence sessions, dated. The ceiling for a
   store that keeps only user turns; the gap to ``wiki`` is what recall and claim
   splitting lose.
@@ -53,8 +57,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from jev_wiki import __version__  # noqa: E402
-from jev_wiki.engine import Engine  # noqa: E402
-from longmemeval import score_sessions, select, session_text  # noqa: E402
+from jev_wiki.engine import MIN_RELEVANCE, Engine  # noqa: E402
+from jev_wiki.provider import JevProvider, ProviderError  # noqa: E402
+from longmemeval import default_cache_dir, score_sessions, select, session_text  # noqa: E402
 from longmemeval_offline import KeepEverything, _embedder  # noqa: E402
 
 MODES = ("wiki", "oracle", "none")
@@ -115,6 +120,10 @@ ATTEMPTS = 7
 _CALL_ERRORS = (OSError, http.client.HTTPException, KeyError, json.JSONDecodeError)
 
 
+class IntakeIncomplete(RuntimeError):
+    """Live intake left a session unprocessed; the store would turn it into a miss."""
+
+
 def chat(model: str, prompt: str) -> str:
     """One non-streaming /api/chat call, retried on transient failures."""
     body = {
@@ -149,11 +158,22 @@ def judge_prompt(item: dict, response: str) -> str:
 
 
 def wiki_notes(item: dict) -> tuple[str, dict]:
-    """Recall from a fresh keep-everything wiki; return dated notes and session recall."""
+    """Recall from a fresh wiki; return dated notes and session recall.
+
+    Offline, intake keeps everything and recall is local. Live, JEV decides intake and
+    reranks the recall shortlist.
+    """
     expected_ids = set(item["answer_session_ids"])
     date_of, expected = {}, set()
+    live = _CONFIG.get("live")
+    provider = (
+        JevProvider(model=_CONFIG["jev_model"], cache_dir=_CONFIG["cache_dir"])
+        if live
+        else KeepEverything()
+    )
+    statuses: dict[str, int] = defaultdict(int)
     with tempfile.TemporaryDirectory(prefix="jev-lme-qa-") as root:
-        engine = Engine(root, KeepEverything(), embedder=_embedder())
+        engine = Engine(root, provider, embedder=_embedder())
         for index, (sid, date, session) in enumerate(
             zip(item["haystack_session_ids"], item["haystack_dates"], item["haystack_sessions"])
         ):
@@ -163,17 +183,23 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
                 expected.add(key)
             text = session_text(session)
             if text:
-                engine.ingest(text, source_key=key, title=key, metadata={"role": "user"})
-        for claim in engine.store.claims(active_only=False):
-            if claim["status"] != "active":
-                engine.store.update_claim(claim["id"], {"status": "active"})
+                result = engine.ingest(text, source_key=key, title=key, metadata={"role": "user"})
+                statuses[result["status"]] += 1
+        if live and set(statuses) - {"complete"}:
+            raise IntakeIncomplete(f"ingestion incomplete: {dict(statuses)}")
+        if not live:
+            for claim in engine.store.claims(active_only=False):
+                if claim["status"] != "active":
+                    engine.store.update_claim(claim["id"], {"status": "active"})
         key_of = {s["id"]: s["source_key"] for s in engine.store.sources()}
+        active = len(engine.store.claims())
         result = engine.recall(
             item["question"],
             limit=20,
             max_chars=20_000,
-            offline=True,
+            offline=not live,
             aggregate_limit=_CONFIG.get("aggregate_limit"),
+            min_relevance=MIN_RELEVANCE if not live else _CONFIG["min_relevance"],
         )
     keys = [key_of[i["source_id"]] for i in result["items"]]
     notes = "\n".join(
@@ -181,11 +207,19 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
         for n, (key, i) in enumerate(zip(keys, result["items"]), 1)
     )
     retrieval = score_sessions(keys, expected) if expected else {}
-    return notes, {
+    stats = {
         "claims": len(result["items"]),
         "aggregate": result["aggregate"],
         "recall_any@10": retrieval.get("recall_any@10"),
     }
+    if live:
+        stats.update(
+            claims_active=active,
+            recall_mode=result["mode"],
+            degraded=result["degraded"],
+            telemetry=dict(provider.telemetry),
+        )
+    return notes, stats
 
 
 def oracle_notes(item: dict) -> str:
@@ -211,7 +245,11 @@ def run_question(item: dict) -> dict:
     mode = _CONFIG["mode"]
     started = time.perf_counter()
     if mode == "wiki":
-        notes, stats = wiki_notes(item)
+        try:
+            notes, stats = wiki_notes(item)
+        except (IntakeIncomplete, ProviderError) as exc:
+            row["error"] = f"{type(exc).__name__}: {exc}"[:300]
+            return row
         row.update(stats)
     elif mode == "oracle":
         notes = oracle_notes(item)
@@ -253,6 +291,20 @@ def summarize(rows: list[dict]) -> dict:
         "accuracy_answerable": accuracy([r for r in rows if not r["abstention"]]),
         "by_type": {k: {"n": len(v), "accuracy": accuracy(v)} for k, v in sorted(by_type.items())},
     }
+    telemetry = defaultdict(int)
+    for row in rows:
+        for key, value in row.get("telemetry", {}).items():
+            telemetry[key] += value
+    if telemetry:
+        out["jev"] = {
+            "paid_requests": telemetry["requests"],
+            "cache_hits": telemetry["cache_hits"],
+            "input_tokens": telemetry["input_tokens"],
+            "degraded_recalls": sum(bool(r.get("degraded")) for r in rows),
+            "claims_returned_mean": round(
+                statistics.mean(r["claims"] for r in rows if "claims" in r), 1
+            ),
+        }
     retrieved = [r for r in rows if r.get("recall_any@10") is not None and "correct" in r]
     if retrieved:
         hit = [r for r in retrieved if r["recall_any@10"]]
@@ -279,12 +331,32 @@ def main() -> int:
         type=int,
         help="wiki mode: recall up to this many claims for counting and date questions",
     )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="wiki mode: JEV intake and rerank (paid; cached) instead of offline recall",
+    )
+    parser.add_argument(
+        "--min-relevance",
+        type=float,
+        default=MIN_RELEVANCE,
+        help="--live: JEV rerank cut (default: the shipped %(default)s)",
+    )
+    parser.add_argument("--jev-model", default="jev-1.13.0")
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=default_cache_dir(),
+        help="--live: JEV response cache shared with longmemeval.py (default: %(default)s)",
+    )
     parser.add_argument("--output", help="write the full report (summary and rows) here")
     parser.add_argument(
         "--resume", help="an earlier --output report: keep its graded rows, rerun the rest"
     )
     args = parser.parse_args()
 
+    if args.live and args.mode != "wiki":
+        parser.error("--live needs --mode wiki")
     items = json.loads(Path(args.data).read_text())
     per_type = args.per_type or len(items)
     items = select(items, per_type, args.seed, include_abstention=not args.no_abstention)
@@ -294,12 +366,19 @@ def main() -> int:
         "judge": args.judge,
         "endpoint": args.endpoint,
         "aggregate_limit": args.aggregate_limit,
+        "live": args.live,
+        "min_relevance": args.min_relevance if args.live else None,
+        "jev_model": args.jev_model if args.live else None,
+        "cache_dir": str(args.cache_dir) if args.live else None,
     }
     done = {}
     if args.resume:
         earlier = json.loads(Path(args.resume).read_text())
         resumed = {**config, "embedding_model": os.environ.get("JEV_WIKI_EMBEDDING_MODEL")}
-        if {k: earlier["config"].get(k) for k in resumed} != resumed:
+        del resumed["cache_dir"]  # where responses are cached does not change them
+        # Reports from before --live ran offline.
+        before_live = {"live": False}
+        if {k: earlier["config"].get(k, before_live.get(k)) for k in resumed} != resumed:
             parser.error("--resume report was made with a different mode, models or embedder")
         done = {r["question_id"]: r for r in earlier["rows"] if "correct" in r}
     todo = [item for item in items if item["question_id"] not in done]
