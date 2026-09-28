@@ -85,4 +85,5 @@ or long-term forgetting. Those need separately labelled, representative datasets
 
 First live results: [live-evaluation-2026-09-27.md](live-evaluation-2026-09-27.md).
 LongMemEval intake results: [intake-sentence-claims-2026-09-27.md](intake-sentence-claims-2026-09-27.md).
+End-to-end LongMemEval QA: [longmemeval-qa-2026-09-28.md](longmemeval-qa-2026-09-28.md).
 Live sweep on main with a finer keep-threshold sweep: [longmemeval-live-2026-09-28.md](longmemeval-live-2026-09-28.md).
