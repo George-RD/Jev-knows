@@ -60,8 +60,8 @@ missing was the other mentions within those sessions.
 ## Cost
 
 - No TypeSafe calls. The QA run cost 1,500 reader and judge calls on Ollama Cloud.
-- With 3,000 claims, extending to 60 or 100 claims adds under 20 ms to an offline
-  recall (about 300 ms in total), well inside the prompt hook's 0.75 s budget. The
+- With 3,000 claims, extending to 60 or 100 claims adds about 70 ms to an offline
+  recall (about 370 ms in total), inside the prompt hook's 0.75 s budget. The
   hook still asks for 5 claims and 6,000 characters. That budget, not the limit,
   would cap it if the hook passed `aggregate_limit`.
 - The JEV rerank request doesn't change size, because the extras are never reranked.
