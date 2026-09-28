@@ -399,6 +399,11 @@ def main() -> int:
         help="Also score _abs questions, as retrieval of their labelled related session; "
         "this does not measure abstention itself.",
     )
+    parser.add_argument(
+        "--types",
+        help="Comma-separated question types to keep from the seeded selection, so a cheap "
+        "subset reuses exactly the questions of the full sweep",
+    )
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--model", default="jev-1.13.0")
     parser.add_argument("--output", required=True)
@@ -429,6 +434,12 @@ def main() -> int:
     data = json.loads(Path(args.data).read_text(encoding="utf-8"))
     chosen = select(data, args.per_type, args.seed, args.include_abstention)
     del data
+    if args.types:
+        wanted = {t.strip() for t in args.types.split(",") if t.strip()}
+        unknown = wanted - {i["question_type"] for i in chosen}
+        if unknown:
+            parser.error(f"unknown question types: {', '.join(sorted(unknown))}")
+        chosen = [i for i in chosen if i["question_type"] in wanted]
     started = time.perf_counter()
     rows, failures = [], []
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
@@ -456,6 +467,7 @@ def main() -> int:
             "per_type": args.per_type,
             "seed": args.seed,
             "include_abstention": args.include_abstention,
+            "types": sorted(wanted) if args.types else None,
             "question_ids": [i["question_id"] for i in chosen],
         },
         "wall_seconds": round(time.perf_counter() - started, 1),

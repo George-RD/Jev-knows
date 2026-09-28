@@ -16,7 +16,7 @@ from .bm25 import STOPWORDS, bm25_from_stats, query_terms, term_stats
 from .provider import ProviderError
 from .store import WikiStore
 
-RUBRIC_VERSION = "wiki-v2"  # Intake: candidate boundaries and keep/kind/topic questions.
+RUBRIC_VERSION = "wiki-v3"  # Intake: candidate boundaries and keep/kind/topic questions.
 # Relation checks did not change with intake; bumping this re-checks every pair.
 RELATION_RUBRIC_VERSION = "wiki-v1"
 KINDS = {
@@ -25,7 +25,10 @@ KINDS = {
     "preference": "An explicit preference, constraint, or working style",
     "procedure": "A reusable method or lesson",
     "commitment": "An explicit commitment or next action; not a scheduler",
-    "uncertain": "Hypothesis, speculation, question, or ambiguous statement",
+    "uncertain": (
+        "Hypothesis, speculation, or ambiguous statement; a question or request only when "
+        "it states nothing definite about the speaker or their world"
+    ),
 }
 TOPICS = {
     "people": "People and relationships",
@@ -435,7 +438,11 @@ class Engine:
                         KEEP,
                     )
                     questions[f"kind_{i}"] = _choice(
-                        prefix + "What kind of assertion is it?", KINDS
+                        prefix + "What kind of assertion is it? Judge what it states, not "
+                        "its sentence form: a question or request that mentions the "
+                        "speaker's possessions, plans, habits, or situation asserts that "
+                        "fact.",
+                        KINDS,
                     )
                     questions[f"topic_{i}"] = _choice(
                         prefix + "Choose its broad wiki topic.", TOPICS
