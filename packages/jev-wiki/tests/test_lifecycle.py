@@ -9,9 +9,10 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
-from jev_wiki.engine import Engine, candidate_spans, definite_kind
+from jev_wiki.engine import KINDS, Engine, candidate_spans, definite_kind
 from jev_wiki.provider import ProviderError
 
 
@@ -71,6 +72,12 @@ class LifecycleDecisionFixture:
             if name.startswith("kind_") and self.kind_answer is not None:
                 answers[name] = dict(self.kind_answer)
         return answers
+
+
+def kind_answer(value, **probabilities):
+    """A kind answer carrying a complete distribution over the engine's kinds."""
+    distribution = dict.fromkeys(KINDS, 0.0) | probabilities
+    return {"value": value, "confidence": 0.21, "probabilities": distribution}
 
 
 def self_assert_score(question):
@@ -199,42 +206,70 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.engine.recall("Atlas", offline=True)["items"], [])
 
     def test_kind_split_between_assertions_is_still_definite(self):
-        # JEV's confidence is a margin: 0.60 fact vs 0.39 preference reads as 0.21,
+        # JEV's confidence is a margin: 0.60 preference vs 0.39 fact reads as 0.21,
         # yet the candidate is plainly not speculation.
-        split = {"fact": 0.60, "preference": 0.39, "uncertain": 0.01}
         self.engine.provider = LifecycleDecisionFixture(
-            kind_answer={"value": "fact", "confidence": 0.21, "probabilities": split}
+            kind_answer=kind_answer("preference", preference=0.60, fact=0.39, uncertain=0.01)
         )
         result = self.ingest("I have been watching a lot of documentaries on Netflix.")
         self.assertEqual(result["active"], 1)
 
     def test_likely_speculation_stays_review_even_when_not_top_choice(self):
-        split = {"fact": 0.40, "preference": 0.25, "uncertain": 0.35}
         self.engine.provider = LifecycleDecisionFixture(
-            kind_answer={"value": "fact", "confidence": 0.05, "probabilities": split}
+            kind_answer=kind_answer("fact", fact=0.40, preference=0.25, uncertain=0.35)
         )
         result = self.ingest("Project Atlas might use a blue console, I think.")
         self.assertEqual(result["active"], 0)
         self.assertEqual(result["review"], 1)
 
-    def test_definite_kind_falls_back_to_confidence_without_probabilities(self):
+    def test_definite_kind_reads_only_a_valid_distribution(self):
+        self.assertTrue(definite_kind(kind_answer("fact", fact=0.7, uncertain=0.3)))
+        self.assertFalse(definite_kind(kind_answer("fact", fact=0.69, uncertain=0.31)))
+        self.assertFalse(definite_kind(kind_answer("uncertain", fact=0.2, uncertain=0.8)))
+        # Without a distribution, the top choice's confidence decides.
         self.assertTrue(definite_kind({"value": "fact", "confidence": 0.70}))
         self.assertFalse(definite_kind({"value": "fact", "confidence": 0.69}))
         self.assertFalse(definite_kind({"value": "uncertain", "confidence": 0.99}))
-        self.assertFalse(
-            definite_kind(
-                {"value": "uncertain", "confidence": 0.1, "probabilities": {"uncertain": 0.2}}
+        valid = kind_answer("fact", fact=0.99, uncertain=0.01)
+        malformed = {
+            "partial": {"fact": 0.9, "uncertain": 0.0},
+            "nan": {**valid["probabilities"], "fact": float("nan")},
+            "bool": {**valid["probabilities"], "uncertain": False},
+            "unnormalised": {**valid["probabilities"], "fact": 0.5},
+            "choice not on top": {**valid["probabilities"], "fact": 0.01, "decision": 0.99},
+        }
+        for name, probabilities in malformed.items():
+            with self.subTest(name):
+                answer = {"value": "fact", "confidence": 0.1, "probabilities": probabilities}
+                self.assertFalse(definite_kind(answer))
+
+    def test_reclassify_promotes_claims_stored_under_the_margin_gate(self):
+        def margin_gate(kind, floor=0.70):
+            return kind.get("value") != "uncertain" and kind.get("confidence", 0) >= floor
+
+        split = kind_answer("preference", preference=0.60, fact=0.39, uncertain=0.01)
+        self.engine.provider = LifecycleDecisionFixture(kind_answer=split)
+        with mock.patch("jev_wiki.engine.definite_kind", margin_gate):
+            self.ingest("I have been watching a lot of documentaries on Netflix.")
+            self.ingest("I keep my bike in the hallway at home.", "demoted")
+            self.ingest(
+                "I keep my notes about Atlas in a green binder.",
+                "assistant",
+                metadata={"role": "assistant"},
             )
+            self.ingest("My old flat had a blue door.", "superseded")
+        self.assertEqual(self.engine.store.claims(), [])
+        demoted = next(
+            c for c in self.engine.store.claims(active_only=False) if "hallway" in c["text"]
         )
-        # A malformed probability is ignored rather than trusted.
-        self.assertFalse(
-            definite_kind(
-                {"value": "fact", "confidence": 0.1, "probabilities": {"uncertain": float("nan")}}
-            )
-        )
-        self.assertTrue(
-            definite_kind({"value": "fact", "confidence": 0.1, "probabilities": {"uncertain": 0.3}})
-        )
+        self.engine.store.update_claim(demoted["id"], {"status": "review"})
+        self.ingest("My new flat has a red door.", "superseded")  # supersedes the blue door
+        before = {c["text"] for c in self.engine.store.claims()}
+
+        self.assertEqual(self.engine.reclassify(), {"promoted": 1})
+        promoted = {c["text"] for c in self.engine.store.claims()} - before
+        self.assertEqual(promoted, {"I have been watching a lot of documentaries on Netflix."})
+        self.assertEqual(self.engine.reclassify(), {"promoted": 0})
 
     def test_assistant_tool_and_synthesis_are_not_promoted_to_facts(self):
         for role in ("assistant", "tool", "synthesis"):
