@@ -514,17 +514,18 @@ class WikiStore:
         """Activate intake-review claims of current sources that ``admits(claim, source)``.
 
         Eligibility is decided under the lock, so a concurrent update always wins:
-        claims with a review reason, from another rubric, or already updated by a
-        caller (a ``claim_updated`` event) are never promoted. Only current sources'
+        claims with a review reason, from another rubric, or already set by a caller
+        (``update_claim`` or a curated ``put_claims``) are never promoted. Only current sources'
         raw text is read. Returns the promoted claim ids.
         """
         with self._locked():
             state = self._load()
-            updated = {
-                event["data"].get("claim_id")
-                for event in state["events"]
-                if event.get("type") == "claim_updated"
-            }
+            updated = set()
+            for event in state["events"]:
+                if event.get("type") == "claim_updated":
+                    updated.add(event["data"].get("claim_id"))
+                elif event.get("type") == "claims_replaced":
+                    updated.update(event["data"].get("claim_ids") or [])
             promoted, raw = [], {}
             for claim_id, claim in state["claims"].items():
                 source = state["sources"][claim["source_id"]]

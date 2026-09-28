@@ -285,6 +285,18 @@ class LifecycleTests(unittest.TestCase):
         (self.root / gone["path"]).unlink()
         self.assertEqual(self.engine.reclassify(), {"promoted": 1})
 
+    def test_reclassify_leaves_curated_claims_alone(self):
+        def margin_gate(kind, floor=0.70):
+            return kind.get("value") != "uncertain" and kind.get("confidence", 0) >= floor
+
+        split = kind_answer("preference", preference=0.60, fact=0.39, uncertain=0.01)
+        self.engine.provider = LifecycleDecisionFixture(kind_answer=split)
+        with mock.patch("jev_wiki.engine.definite_kind", margin_gate):
+            self.ingest("I have been watching a lot of documentaries on Netflix.")
+        claim = self.engine.store.claims(active_only=False)[0]
+        self.engine.store.put_claims(claim["source_id"], [claim])
+        self.assertEqual(self.engine.reclassify(), {"promoted": 0})
+
     def test_update_during_reclassify_is_not_overwritten(self):
         # Eligibility is decided under the store lock, after any earlier update landed.
         def margin_gate(kind, floor=0.70):
