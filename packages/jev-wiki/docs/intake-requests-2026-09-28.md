@@ -4,7 +4,7 @@ After [preference-misses-2026-09-28.md](preference-misses-2026-09-28.md), two
 single-session-preference questions still missed on the 30-question live sweep
 (`examples/longmemeval.py --per-type 5 --seed 0`, model `jev-1.13.0`). In both, the
 answer sits inside a request ("organize my tech accessories, like my new portable
-power bank", "inspiration for a new bedroom dresser to replace my old one"). JEV
+power bank", "inspiration for a new bedroom dresser"). JEV
 kept the sentence but filed its kind as `uncertain` (0.73–0.82), because the
 `uncertain` description listed "question".
 
