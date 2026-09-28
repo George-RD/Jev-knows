@@ -30,6 +30,13 @@ EVIDENCE_PREFIX = (
     "<untrusted_memory_evidence>\n"
 )
 EVIDENCE_SUFFIX = "\n</untrusted_memory_evidence>"
+# Of the 0.75 s hook budget, embedding (model load plus any claims not yet indexed)
+# may run until this long after the hook starts. Claim similarities come after the
+# store load and BM25, so this leaves the rest of the budget for packing the context.
+HOOK_EMBEDDING_SECONDS = 0.55
+# Claims a prompt may encode that the worker has not indexed (about 50 ms); a larger
+# backlog is worked off this many per prompt, with those prompts staying lexical.
+HOOK_MAX_NEW_CLAIMS = 512
 
 
 class HookTimeout(Exception):
@@ -171,6 +178,40 @@ def queue_event(
     return source_key
 
 
+class _HookEmbedder:
+    """The configured embedder, loaded only once recall has claims to compare.
+
+    Never downloads. Loading, and encoding claims the worker has not indexed yet, must
+    finish within HOOK_EMBEDDING_SECONDS of the hook starting, and at most
+    HOOK_MAX_NEW_CLAIMS claims are encoded (and saved for the next prompt) per prompt.
+    Otherwise this recall stays lexical.
+    """
+
+    def __init__(self, root: Path, started: float):
+        self.root, self.started = root, started
+        self.embedder: Any = None
+
+    def similarities(self, query: str, texts: list[str]) -> list[float]:
+        if self.embedder is None:
+            from .embedding import VECTOR_DIR, from_env
+
+            self.embedder = from_env(
+                local_only=True,
+                cache_dir=_path(self.root, VECTOR_DIR),
+                deadline=self.started + HOOK_EMBEDDING_SECONDS,
+                max_new=HOOK_MAX_NEW_CLAIMS,
+            )
+            if self.embedder is None:
+                raise LookupError("No embedding model loaded within the hook's budget")
+        return self.embedder.similarities(query, texts)
+
+
+def _hook_embedder(root: Path, started: float) -> _HookEmbedder | None:
+    from .embedding import ENV_VAR
+
+    return _HookEmbedder(root, started) if os.environ.get(ENV_VAR, "").strip() else None
+
+
 def _evidence(context: str, max_chars: int) -> str:
     packet = EVIDENCE_PREFIX + html.escape(context, quote=False) + EVIDENCE_SUFFIX
     # An evidence quotation and its citation are indivisible. Drop a packet
@@ -184,12 +225,15 @@ def handle_hook(
     *,
     project_root: str | Path,
     max_chars: int = MAX_CONTEXT_CHARS,
+    started: float | None = None,
 ) -> dict[str, Any]:
     """Handle a supported event without ever blocking the agent's action.
 
     Missing scope, malformed input, storage failures and retrieval failures all
     produce an empty result. No transcript path is read, even if one is supplied.
     """
+    # The embedding deadline counts from the caller's budget start (hook_time_budget).
+    started = time.monotonic() if started is None else started
     try:
         if not isinstance(payload, dict) or len(_canonical(payload)) > MAX_PAYLOAD_BYTES:
             return {}
@@ -215,7 +259,7 @@ def handle_hook(
         if context_budget < 256:
             return {}
         query = text if len(text) <= 2_000 else text[:1_000] + text[-1_000:]
-        result = Engine(root).recall(
+        result = Engine(root, embedder=_hook_embedder(root, started)).recall(
             query,
             limit=5,
             max_chars=context_budget,

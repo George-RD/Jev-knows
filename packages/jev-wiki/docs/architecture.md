@@ -39,7 +39,7 @@ Our choices are:
 | Canonical JSON state | Source metadata, processing status, selected spans, decisions, relationships and tombstones | This is the committed application state; raw text alone cannot reproduce past probabilistic decisions |
 | Hook inbox | Pending capture events and content-free processed-event receipts | Separate files under `inbox/`; the worker captures each event before consuming it |
 | Generated Markdown | Classified memory pages, review queue, raw-source links, index and activity log | Rendered from canonical state; direct edits are not imported into state |
-| Retrieval candidates | Lexical matches over active memory | Computed from current state; no separate vector or SQLite database |
+| Retrieval candidates | Lexical matches over active memory, plus optional embedding matches | Computed from current state; optional claim vectors in `embeddings/` are a disposable cache keyed by claim text, not a database |
 | Provider adapter | Request construction, response validation and remote boundary | Receives bounded data; cannot directly edit sources or pages |
 | Harness adapter | Event capture and bounded context output | Uses the same memory engine; does not establish a second memory store |
 
@@ -78,7 +78,8 @@ the query's topic can overtake one that matched nearly as well on the query's fi
 words alone. The twelve best plain-BM25 claims always stay in the 24-claim shortlist,
 so a source full of filler matches cannot crowd out a rare-term match before JEV
 reranks. With an optional local embedder (the `embed` extra and
-`JEV_WIKI_EMBEDDING_MODEL`; CLI `recall` without `--offline`), the twelve best plain-BM25 claims share the shortlist with
+`JEV_WIKI_EMBEDDING_MODEL`; CLI `recall` without `--offline`, and the prompt hook when
+the model is downloaded and loads in time), the twelve best plain-BM25 claims share the shortlist with
 the claims most similar to the query, ordered by reciprocal-rank fusion, so evidence
 with no shared words can reach the ranker; claims below 0.2 similarity are never
 added. See [embedding-candidates-2026-09-27.md](embedding-candidates-2026-09-27.md).

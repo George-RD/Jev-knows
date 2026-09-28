@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .bm25 import STOPWORDS, bm25_from_stats, query_terms, term_stats
+from .hooks import HookTimeout
 from .provider import ProviderError
 from .store import WikiStore
 
@@ -278,6 +279,11 @@ SEMANTIC_WEIGHT = 2.0
 # Claims less similar than this are never semantic candidates, so a query with no
 # related memory is not padded with the nearest unrelated claims.
 MIN_SIMILARITY = 0.2
+
+
+# JEV rerank: claims scoring below this (0 Unrelated .. 3 Direct evidence, as an
+# expected value) are dropped unless recall(backfill=True) keeps them after the rest.
+MIN_RELEVANCE = 1.5
 
 
 def _order(c: dict) -> tuple:
@@ -689,6 +695,8 @@ class Engine:
         context_cost: Callable[[str], int] = len,
         aggregate_limit: int | None = None,
         as_of: date | str | None = None,
+        min_relevance: float = MIN_RELEVANCE,
+        backfill: bool = False,
     ) -> dict:
         """Pack whole evidence blocks using the caller's trusted output-size measure.
 
@@ -703,6 +711,12 @@ class Engine:
         (default: today, UTC), and claims from sources dated in that window are packed
         first, keeping their order among themselves. At ``limit`` or ``max_chars`` they
         displace better-ranked claims from outside the window.
+
+        With a provider, JEV scores each shortlisted claim 0–3 and claims scoring at
+        least ``min_relevance`` come first, best score first. Without ``backfill`` the
+        rest are dropped; with it they follow in shortlist order (the order
+        ``offline=True`` returns: lexical, or hybrid with an embedder), so the rerank
+        only reorders and never loses a shortlisted candidate.
         """
         if not isinstance(query, str) or not query.strip() or len(query) > 2000:
             raise ValueError("query must contain 1–2000 characters")
@@ -721,6 +735,12 @@ class Engine:
         aggregate = aggregate_limit is not None and aggregation_query(query)
         if aggregate:
             limit = max(limit, aggregate_limit)
+        if (
+            isinstance(min_relevance, bool)
+            or not isinstance(min_relevance, (int, float))
+            or not 0 <= min_relevance <= 3
+        ):
+            raise ValueError("min_relevance must be 0–3")
         sources = {s["id"]: {**s, "date": source_date(s)} for s in self.store.sources()}
         claims = [
             {**claim, "source": sources[claim["source_id"]]}
@@ -747,6 +767,8 @@ class Engine:
         if self.embedder is not None and claims:
             try:
                 similarities = self.embedder.similarities(query, [c["text"] for c in claims])
+            except HookTimeout:
+                raise  # The hook's own budget ran out: stop, do not continue lexically.
             except Exception:  # noqa: BLE001 - optional model; lexical candidates still stand.
                 similarities = None
         candidates = _candidates(claims, scores, lifted, similarities)
@@ -786,8 +808,10 @@ class Engine:
                     ):
                         raise ProviderError("invalid relevance score")
                     claim["relevance"] = score
-                shortlist = [c for c in shortlist if c["relevance"] >= 1.5]
-                shortlist.sort(key=lambda c: (-c["relevance"], *_order(c)))
+                promoted = [c for c in shortlist if c["relevance"] >= min_relevance]
+                promoted.sort(key=lambda c: (-c["relevance"], *_order(c)))
+                rest = [c for c in shortlist if c["relevance"] < min_relevance]
+                shortlist = promoted + rest if backfill else promoted
                 mode = "jev_reranked"
                 degraded = False
             except (ProviderError, KeyError, TypeError):

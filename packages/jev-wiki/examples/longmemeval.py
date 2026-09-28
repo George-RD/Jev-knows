@@ -16,7 +16,9 @@ with no retention step. Then, for each acceptance policy (see ``POLICIES``), cla
 promoted through the store's review API and four retrieval modes run:
 
 - ``wiki_lexical``: ``Engine.recall(offline=True)``; the engine's BM25 shortlist.
-- ``wiki_jev``: ``Engine.recall()``; that shortlist, reranked by JEV.
+- ``wiki_jev``: ``Engine.recall()``; that shortlist, reranked by JEV at the shipped
+  ``min_relevance`` cut. The ``wiki_jev_*`` modes vary the cut and backfill
+  (``RERANK_VARIANTS``); they share one JEV request per question (``RerankMemo``).
 - ``bm25_claims``: BM25 over the same active claims' text alone, cut to the engine's
   shortlist bounds.
 - ``bm25_claims_jev``: that BM25 shortlist scored by the engine's own rerank question.
@@ -49,6 +51,7 @@ input tokens the hits saved.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import random
@@ -66,8 +69,10 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 
 from jev_wiki import __version__  # noqa: E402
 from jev_wiki.bm25 import bm25_scores  # noqa: E402
+from jev_wiki.embedding import DEFAULT_MODEL, ENV_VAR  # noqa: E402
 from jev_wiki.engine import (  # noqa: E402
     KIND_CONFIDENCE,
+    MIN_RELEVANCE,
     RUBRIC_VERSION,
     SHORTLIST_BYTES,
     SHORTLIST_SIZE,
@@ -100,6 +105,37 @@ def score_sessions(ranked: list[str], expected: set[str]) -> dict:
     return out
 
 
+class RerankMemo:
+    """Answers each distinct rerank request once per question, whatever the cache.
+
+    The ``RERANK_VARIANTS`` recalls all send the same rerank request; this makes them
+    cost one request even with ``--no-cache`` or an alias model, and judges every
+    variant on the same scores (a failure is replayed too, so they fail together).
+    Other requests (intake) pass straight through.
+    """
+
+    def __init__(self, provider: JevProvider):
+        self.provider = provider
+        self.answers: dict[tuple[str, str], object] = {}
+
+    def ask(self, state: str, questions: dict) -> dict:
+        if not all(name.startswith("rank_") for name in questions):
+            return self.provider.ask(state, questions)
+        key = (state, json.dumps(questions, sort_keys=True))
+        if key not in self.answers:
+            try:
+                self.answers[key] = self.provider.ask(state, questions)
+            except ProviderError as error:
+                self.answers[key] = error
+        answer = self.answers[key]
+        if isinstance(answer, ProviderError):
+            raise answer
+        return copy.deepcopy(answer)
+
+    def __getattr__(self, name: str):
+        return getattr(self.provider, name)
+
+
 def jev_rerank(provider: JevProvider, query: str, claims: list[dict]) -> list[dict]:
     """The engine's rerank question and threshold, applied to a caller-chosen shortlist."""
     questions = {
@@ -116,7 +152,7 @@ def jev_rerank(provider: JevProvider, query: str, claims: list[dict]) -> list[di
     state = json.dumps({str(i): c["text"] for i, c in enumerate(claims)}, ensure_ascii=False)
     answers = provider.ask(state, questions)
     scored = [{**c, "relevance": answers[f"rank_{i}"]["value"]} for i, c in enumerate(claims)]
-    kept = [c for c in scored if c["relevance"] >= 1.5]
+    kept = [c for c in scored if c["relevance"] >= MIN_RELEVANCE]
     return sorted(kept, key=lambda c: -c["relevance"])
 
 
@@ -187,13 +223,17 @@ def evaluate_policy(engine, provider, query, key_of, expected, answer_turns) -> 
 
     lexical = engine.recall(query, limit=20, max_chars=20_000, offline=True)
     out["wiki_lexical"] = score_sessions(ranked(lexical), expected)
-    live = engine.recall(query, limit=20, max_chars=20_000)
-    if live["degraded"]:
-        # The engine fell back to lexical order after a failed JEV call.
-        out["wiki_jev"] = {"error": "jev_rerank_failed", "mode": live["mode"]}
-    else:
-        out["wiki_jev"] = score_sessions(ranked(live), expected)
-        out["wiki_jev"].update(mode=live["mode"], returned=len(live["items"]))
+    for mode, min_relevance, backfill in RERANK_VARIANTS:
+        # Every variant sends the same rerank request; RerankMemo answers it once.
+        live = engine.recall(
+            query, limit=20, max_chars=20_000, min_relevance=min_relevance, backfill=backfill
+        )
+        if live["degraded"]:
+            # The engine fell back to lexical order after a failed JEV call.
+            out[mode] = {"error": "jev_rerank_failed", "mode": live["mode"]}
+        else:
+            out[mode] = score_sessions(ranked(live), expected)
+            out[mode].update(mode=live["mode"], returned=len(live["items"]))
     picked = shortlist_by_bm25(query, active)
     out["bm25_claims"] = score_sessions([key_of[c["source_id"]] for c in picked], expected)
     try:
@@ -211,7 +251,28 @@ def session_text(session: list[dict]) -> str:
     return "\n\n".join(t["content"].strip() for t in session if t["role"] == "user").strip()
 
 
-def run_question(item: dict, model: str, cache_dir: str | None = None) -> dict:
+# One embedder per worker process, loaded on its first question.
+_EMBEDDERS: dict[str, object] = {}
+
+
+def embedder_for(name: str | None):
+    """The engine's optional embedder for ``name`` (``default`` = DEFAULT_MODEL), or None.
+
+    Unlike ``embedding.from_env`` a model that fails to load raises, so a sweep meant to
+    measure embedding candidates cannot silently score lexical recall instead.
+    """
+    if not name:
+        return None
+    if name not in _EMBEDDERS:
+        from jev_wiki.embedding import StaticEmbedder
+
+        _EMBEDDERS[name] = StaticEmbedder(DEFAULT_MODEL if name == "default" else name)
+    return _EMBEDDERS[name]
+
+
+def run_question(
+    item: dict, model: str, cache_dir: str | None = None, embedding_model: str | None = None
+) -> dict:
     started = time.perf_counter()
     expected_ids = set(item["answer_session_ids"])
     keys, texts, expected = [], [], set()
@@ -241,9 +302,9 @@ def run_question(item: dict, model: str, cache_dir: str | None = None) -> dict:
     row["bm25_sessions"] = score_sessions(
         [keys[i] for i in bm25_rank(item["question"], texts)], expected
     )
-    provider = JevProvider(model=model, cache_dir=cache_dir)
+    provider = RerankMemo(JevProvider(model=model, cache_dir=cache_dir))
     with tempfile.TemporaryDirectory(prefix="jev-lme-") as root:
-        engine = Engine(root, provider)
+        engine = Engine(root, provider, embedder=embedder_for(embedding_model))
         statuses = Counter()
         candidates = 0
         for key, text in zip(keys, texts):
@@ -307,7 +368,27 @@ def select(data: list[dict], per_type: int, seed: int, include_abstention: bool)
     return chosen
 
 
-MODES = ("wiki_lexical", "wiki_jev", "bm25_claims", "bm25_claims_jev")
+# Engine.recall rerank settings: (mode, min_relevance, backfill). ``wiki_jev`` is the
+# shipped cut. A ``cut`` drops claims scoring below it; ``reorder`` keeps every
+# shortlisted claim in JEV score order; ``backfill`` promotes claims at or above the
+# cut in score order and keeps the rest after them in lexical order.
+RERANK_VARIANTS = (
+    ("wiki_jev", 1.5, False),
+    ("wiki_jev_cut1.0", 1.0, False),
+    ("wiki_jev_cut0.5", 0.5, False),
+    ("wiki_jev_cut0.1", 0.1, False),
+    ("wiki_jev_reorder", 0.0, False),
+    ("wiki_jev_backfill2.0", 2.0, True),
+    ("wiki_jev_backfill1.5", 1.5, True),
+    ("wiki_jev_backfill1.0", 1.0, True),
+    ("wiki_jev_backfill0.5", 0.5, True),
+)
+MODES = (
+    "wiki_lexical",
+    *(mode for mode, _, _ in RERANK_VARIANTS),
+    "bm25_claims",
+    "bm25_claims_jev",
+)
 
 
 def mean(values) -> float | None:
@@ -346,6 +427,8 @@ def summarize(rows: list[dict]) -> dict:
                 entry[mode] = {
                     f"recall_any@{k}": mean(v[f"recall_any@{k}"] for v in valid) for k in (1, 5, 10)
                 }
+                if any("returned" in v for v in valid):
+                    entry[mode]["returned_mean"] = mean(v["returned"] for v in valid)
             out[policy] = entry
         return out
 
@@ -408,6 +491,12 @@ def main() -> int:
     parser.add_argument("--model", default="jev-1.13.0")
     parser.add_argument("--output", required=True)
     parser.add_argument(
+        "--embedding-model",
+        default=os.environ.get(ENV_VAR, "").strip() or None,
+        help=f"Give the engine the optional embedding candidates (needs the embed extra); "
+        f"'default' is {DEFAULT_MODEL}. Defaults to ${ENV_VAR}; unset keeps recall lexical",
+    )
+    parser.add_argument(
         "--cache-dir",
         type=Path,
         default=default_cache_dir(),
@@ -431,6 +520,10 @@ def main() -> int:
     except ProviderError as error:
         print(json.dumps({"status": "refused", "reason": str(error)}))
         return 2
+    embedding_model = None
+    if args.embedding_model:
+        # Load once here so a missing extra or model fails before any paid request.
+        embedding_model = embedder_for(args.embedding_model).name
     data = json.loads(Path(args.data).read_text(encoding="utf-8"))
     chosen = select(data, args.per_type, args.seed, args.include_abstention)
     del data
@@ -443,7 +536,10 @@ def main() -> int:
     started = time.perf_counter()
     rows, failures = [], []
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(run_question, item, args.model, cache_dir): item for item in chosen}
+        futures = {
+            pool.submit(run_question, item, args.model, cache_dir, embedding_model): item
+            for item in chosen
+        }
         for future in as_completed(futures):
             qid = futures[future]["question_id"]
             try:
@@ -462,6 +558,7 @@ def main() -> int:
         "jev_wiki_version": __version__,
         "rubric_version": RUBRIC_VERSION,
         "requested_model": args.model,
+        "embedding_model": embedding_model,
         "observed_models": sorted({r["observed_model"] for r in rows if r["observed_model"]}),
         "selection": {
             "per_type": args.per_type,
