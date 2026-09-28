@@ -18,7 +18,9 @@ kept the sentence but filed its kind as `uncertain` (0.73–0.82), because the
 
 `RUBRIC_VERSION` is `wiki-v3`; relations stay on `wiki-v1`. The keep threshold (0.82),
 the kind gate (0.70) and the rerank cut are unchanged. Stores that already ran intake
-keep their old statuses, because intake does not reprocess.
+are not re-asked. `jev-wiki worker`'s reclassify pass (PR #16) still replays stored
+`wiki-v2` answers through the current gate (`RECLASSIFIABLE_RUBRICS`), since the gate
+reads the same answer shape; it does not apply the new wording to them.
 
 The harness gains `--types`, which keeps only the named question types from the seeded
 selection, so a subset run asks exactly the questions of the full sweep.

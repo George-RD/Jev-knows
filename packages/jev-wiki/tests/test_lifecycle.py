@@ -271,6 +271,26 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(promoted, {"I have been watching a lot of documentaries on Netflix."})
         self.assertEqual(self.engine.reclassify(), {"promoted": 0})
 
+    def test_reclassify_replays_the_previous_intake_rubric_only(self):
+        # wiki-v3 only reworded the kind question, so wiki-v2 answers still replay.
+        def margin_gate(kind, floor=0.70):
+            return kind.get("value") != "uncertain" and kind.get("confidence", 0) >= floor
+
+        split = kind_answer("preference", preference=0.60, fact=0.39, uncertain=0.01)
+        self.engine.provider = LifecycleDecisionFixture(kind_answer=split)
+        with mock.patch("jev_wiki.engine.definite_kind", margin_gate):
+            with mock.patch("jev_wiki.engine.RUBRIC_VERSION", "wiki-v2"):
+                self.ingest("I have been watching a lot of documentaries on Netflix.")
+            with mock.patch("jev_wiki.engine.RUBRIC_VERSION", "wiki-v1"):
+                self.ingest("I keep my bike in the hallway at home.", "v1")
+        self.assertEqual(self.engine.store.claims(), [])
+
+        self.assertEqual(self.engine.reclassify(), {"promoted": 1})
+        self.assertEqual(
+            [c["text"] for c in self.engine.store.claims()],
+            ["I have been watching a lot of documentaries on Netflix."],
+        )
+
     def test_reclassify_ignores_forgotten_sources_whose_raw_text_is_gone(self):
         def margin_gate(kind, floor=0.70):
             return kind.get("value") != "uncertain" and kind.get("confidence", 0) >= floor
