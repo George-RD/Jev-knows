@@ -167,13 +167,13 @@ class AggregateRecallTests(unittest.TestCase):
         result = engine.recall(
             "How many charity fun runs did I do?",
             limit=5,
-            max_chars=4_000,
+            max_chars=4_200,
             offline=True,
             aggregate_limit=30,
         )
         texts = [i["text"] for i in result["items"]]
         self.assertTrue(any(t.startswith("Fun run") for t in texts), texts[-3:])
-        self.assertLessEqual(len(result["context"]), 4_000)
+        self.assertLessEqual(len(result["context"]), 4_200)
 
     def test_invalid_aggregate_limits_are_rejected(self):
         for value in (0, MAX_AGGREGATE_LIMIT + 1, True, 2.5):
@@ -192,7 +192,7 @@ class CliAggregateDefaultTests(unittest.TestCase):
     def recall(self, *extra):
         from jev_wiki.cli import DEFAULT_AGGREGATE_LIMIT, _parser, run
 
-        self.assertEqual(DEFAULT_AGGREGATE_LIMIT, 60)
+        self.assertEqual(DEFAULT_AGGREGATE_LIMIT, 40)
         base = ["--root", str(self.root), "--provider", "none", "recall"]
         return run(_parser().parse_args([*base, *extra]))
 

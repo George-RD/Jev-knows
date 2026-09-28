@@ -50,11 +50,17 @@ prompt hook stay lexical: loading the model takes about a second, over the hook'
 0.75 s budget.
 
 Questions that count, total, order or date events ("how many weddings did I go to",
-"which did I start first") need every mention, not the best few. `recall
---aggregate-limit 60` lets such questions return up to 60 claims; the ranked shortlist
-comes first and the JEV request is unchanged. It is off by default. On LongMemEval it
-lifts answer accuracy from 0.754 to 0.778
-([aggregate recall](docs/aggregate-recall-2026-09-28.md)).
+"which did I start first") need every mention, not the best few. CLI `recall` gives
+such questions up to 40 claims by default, within `--max-chars`; the ranked shortlist
+comes first and the JEV request is unchanged. `--aggregate-limit N` changes the cap
+and `--aggregate-limit 0` turns it off. On LongMemEval it lifts answer accuracy from
+0.754 to 0.776 ([aggregate recall](docs/aggregate-recall-2026-09-28.md),
+[default](docs/aggregate-recall-default-2026-09-28.md)).
+
+Every recalled claim carries its source's date: the `date` you pass in ingest
+metadata (when it happened), or else when it was captured. A question naming a
+relative date ("what did I buy 10 days ago", "last Saturday") packs the claims from
+that window first.
 
 Re-ingest a changed document with the **same source key** to replace its current
 revision. Independent sources need independent keys: capture order does not resolve
