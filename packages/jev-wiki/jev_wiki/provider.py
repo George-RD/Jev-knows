@@ -297,9 +297,13 @@ class JevProvider:
             "requests": 0,
             "retries": 0,
             "cache_hits": 0,
+            "cache_misses": 0,
             "cache_errors": 0,
             "input_tokens": 0,
             "output_tokens": 0,
+            # Usage recorded with cached responses: tokens a repeat run did not pay for.
+            "cached_input_tokens": 0,
+            "cached_output_tokens": 0,
             "failures": 0,
         }
         self.last_model: str | None = None
@@ -357,11 +361,14 @@ class JevProvider:
                     if clean != raw:
                         self._write_cache(cache_path, clean)
                     self.telemetry["cache_hits"] += 1
+                    self.telemetry["cached_input_tokens"] += raw["usage"]["input_tokens"]
+                    self.telemetry["cached_output_tokens"] += raw["usage"]["output_tokens"]
                     self.last_model = raw["model"]
                     return result
             except (OSError, ValueError, ProviderError):
                 # A corrupt optional cache is a miss, never an unchecked decision.
                 self.telemetry["cache_errors"] += 1
+            self.telemetry["cache_misses"] += 1
         raw = self._request(encoded)
         result = _validated_answers(raw, questions, self.model)
         self.telemetry["input_tokens"] += raw["usage"]["input_tokens"]
@@ -466,6 +473,49 @@ class JevProvider:
                 pass
         self.telemetry["retries"] += 1
         self._sleep(delay)
+
+
+_CACHE_ENTRY = re.compile(r"v\d+-[0-9a-f]{64}\.json")
+
+
+def _cache_entries(directory: str | Path) -> list[Path]:
+    """Regular response-cache files directly inside ``directory``; never follows links."""
+    path = Path(directory)
+    if path.is_symlink() or not path.is_dir():
+        return []
+    entries = []
+    for entry in os.scandir(path):
+        if _CACHE_ENTRY.fullmatch(entry.name) and entry.is_file(follow_symlinks=False):
+            entries.append(Path(entry.path))
+    return entries
+
+
+def cache_stats(directory: str | Path) -> dict:
+    """Entry count and bytes of a JevProvider response cache."""
+    entries, size = 0, 0
+    for path in _cache_entries(directory):
+        try:
+            size += path.lstat().st_size
+            entries += 1
+        except FileNotFoundError:
+            continue
+    return {"dir": str(directory), "entries": entries, "bytes": size}
+
+
+def clear_cache(directory: str | Path) -> int:
+    """Delete a JevProvider response cache's entries; returns how many were removed.
+
+    Only files named like cache entries are removed, so pointing this at the wrong
+    directory cannot delete unrelated data, and symlinks are never followed.
+    """
+    removed = 0
+    for path in _cache_entries(directory):
+        try:
+            path.unlink()
+            removed += 1
+        except FileNotFoundError:
+            continue
+    return removed
 
 
 class ScriptedProvider:
