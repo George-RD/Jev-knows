@@ -72,3 +72,6 @@ the changed shortlists (1.22M input tokens). Results JSON:
 filed by what it reveals about the speaker. That is a rubric change (a new
 `RUBRIC_VERSION`): it re-asks all intake, about 3.7k requests and 14M input tokens for
 this sweep.
+
+Follow-up: rubric `wiki-v3` rewords the kind rubric; see
+[intake-requests-2026-09-28.md](intake-requests-2026-09-28.md).
