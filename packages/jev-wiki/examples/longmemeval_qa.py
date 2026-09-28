@@ -29,6 +29,12 @@ Context modes:
   splitting lose.
 - ``none``: no memory. The floor: what the reader guesses.
 
+The reader is not deterministic even at temperature 0: about 6% of verdicts flip between
+identical runs. So each question is answered ``--samples`` times from the same notes (3 by
+default) and graded ``correct`` by majority vote; each sample's answer and verdict are kept
+in the row's ``samples``, and the summary also reports ``accuracy_per_sample``, the mean
+over every sample. ``--samples 1`` answers once, as reports before this option did.
+
 Abstention questions (``_abs``) are included by default because not inventing an answer
 is part of being good memory; ``--no-abstention`` drops them.
 
@@ -295,19 +301,41 @@ def run_question(item: dict) -> dict:
     row["notes_chars"] = len(notes)
     if _CONFIG.get("save_notes"):
         row["notes"] = notes
+    row.update(answer(item, notes, _CONFIG.get("samples", 1)))
+    return row
+
+
+def answer(item: dict, notes: str, samples: int = 1) -> dict:
+    """Answer and grade ``samples`` times from the same notes; ``correct`` is the majority.
+
+    ``hypothesis`` and ``judge_raw`` are the first sample's, as with a single answer. A
+    failed call makes the whole question an error row, so ``--resume`` reruns it.
+    """
     prompt = READER_PROMPT.format(
         notes=notes or "(none)", date=item["question_date"], question=item["question"]
     )
+    graded = []
     try:
-        row["hypothesis"] = chat(_CONFIG["reader"], prompt)
-        verdict = chat(
-            _CONFIG["judge"], judge_prompt({**item, "answer": row["answer"]}, row["hypothesis"])
-        )
-        row["judge_raw"] = verdict[:200]
-        row["correct"] = "yes" in verdict.lower()
+        for _ in range(samples):
+            hypothesis = chat(_CONFIG["reader"], prompt)
+            verdict = chat(
+                _CONFIG["judge"], judge_prompt({**item, "answer": str(item["answer"])}, hypothesis)
+            )
+            graded.append(
+                {
+                    "hypothesis": hypothesis,
+                    "judge_raw": verdict[:200],
+                    "correct": "yes" in verdict.lower(),
+                }
+            )
     except _CALL_ERRORS as exc:
-        row["error"] = f"{type(exc).__name__}: {exc}"[:300]
-    return row
+        return {"error": f"{type(exc).__name__}: {exc}"[:300]}
+    out = {"hypothesis": graded[0]["hypothesis"], "judge_raw": graded[0]["judge_raw"]}
+    if samples > 1:
+        out["samples"] = graded
+        out["votes"] = sum(g["correct"] for g in graded)
+    out["correct"] = 2 * sum(g["correct"] for g in graded) > samples
+    return out
 
 
 def _init(config: dict) -> None:
@@ -319,6 +347,10 @@ def summarize(rows: list[dict]) -> dict:
         graded = [r["correct"] for r in subset if "correct" in r]
         return round(statistics.mean(graded), 3) if graded else None
 
+    def per_sample(subset: list[dict]) -> float | None:
+        graded = [s["correct"] for r in subset if "correct" in r for s in r.get("samples", [r])]
+        return round(statistics.mean(graded), 3) if graded else None
+
     by_type = defaultdict(list)
     for row in rows:
         by_type["abstention" if row["abstention"] else row["question_type"]].append(row)
@@ -326,8 +358,12 @@ def summarize(rows: list[dict]) -> dict:
         "questions": len(rows),
         "errors": sum("error" in r for r in rows),
         "accuracy": accuracy(rows),
+        "accuracy_per_sample": per_sample(rows),
         "accuracy_answerable": accuracy([r for r in rows if not r["abstention"]]),
-        "by_type": {k: {"n": len(v), "accuracy": accuracy(v)} for k, v in sorted(by_type.items())},
+        "by_type": {
+            k: {"n": len(v), "accuracy": accuracy(v), "accuracy_per_sample": per_sample(v)}
+            for k, v in sorted(by_type.items())
+        },
     }
     telemetry = defaultdict(int)
     for row in rows:
@@ -363,6 +399,12 @@ def main() -> int:
     parser.add_argument("--judge", default="glm-5.3")
     parser.add_argument("--endpoint", default="https://ollama.com/api/chat")
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=3,
+        help="answers per question from the same notes, graded by majority (default: %(default)s)",
+    )
     parser.add_argument(
         "--aggregate-limit",
         type=int,
@@ -405,6 +447,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.samples < 1:
+        parser.error("--samples must be at least 1")
     if args.live and args.mode != "wiki":
         parser.error("--live needs --mode wiki")
     if not 0 <= args.min_relevance <= 3:
@@ -420,6 +464,7 @@ def main() -> int:
         "reader": args.reader,
         "judge": args.judge,
         "endpoint": args.endpoint,
+        "samples": args.samples,
         "aggregate_limit": args.aggregate_limit,
         "neighbours": args.neighbours,
         "window_claims": args.window_claims,
@@ -441,9 +486,10 @@ def main() -> int:
             "neighbours": False,
             "window_claims": False,
             "save_notes": False,
+            "samples": 1,
         }
         if {k: earlier["config"].get(k, before_live.get(k)) for k in resumed} != resumed:
-            parser.error("--resume report was made with a different mode, models or embedder")
+            parser.error("--resume report was made with a different mode, models, embedder or sample count")
         done = {r["question_id"]: r for r in earlier["rows"] if "correct" in r}
     todo = [item for item in items if item["question_id"] not in done]
     started = time.perf_counter()
