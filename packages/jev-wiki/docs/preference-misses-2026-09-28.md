@@ -38,6 +38,16 @@ choice's confidence otherwise. The top choice still must not be `uncertain`. The
 threshold (0.82), the 0.70 number and the rerank cut are unchanged. The harness's
 policies use the same function.
 
+Follow-up (PR #16, after review of #15): the distribution is trusted only when it is
+complete and consistent (every kind present, finite, summing to one within rounding,
+the chosen kind on top), otherwise the gate falls back to the top choice's confidence.
+Completed sources are never re-asked, so `Engine.reclassify()`, run by every `worker`
+pass, replays stored decisions for claims intake left in review and promotes those the
+current gate admits. It leaves alone claims of superseded or forgotten sources, claims
+from an older rubric, and any claim a caller has updated. Checked on 2,459 stored claims
+replayed from the cache: the stricter validation gates every real JEV answer the same
+way, so the results below stand.
+
 A sample of claims the change activates (25 of 147 in three questions) is all
 first-person facts, plans and preferences, for example "I've been playing the guitar
 for about 6 months now", "I've got a baby grand that needs to be moved", "I am

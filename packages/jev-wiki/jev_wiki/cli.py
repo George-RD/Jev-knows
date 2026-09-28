@@ -176,6 +176,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         # attempted only once in this run, even after provider failure.
         drained = drain_inbox(args.root, Engine(args.root), limit=args.limit)
         result = {"inbox": drained, **_process_pending(engine, args.limit)}
+        # Local and idempotent: applies the current gate to claims stored before it.
+        result["reclassified"] = engine.reclassify()
         if not args.no_maintain:
             result["maintenance"] = engine.maintain(max_pairs=args.max_pairs)
         return result

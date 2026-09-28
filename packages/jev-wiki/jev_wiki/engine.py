@@ -76,27 +76,61 @@ def _confidence(answer: dict) -> float:
 KIND_CONFIDENCE = 0.70
 
 
+def _kind_probabilities(kind: dict) -> dict[str, float] | None:
+    """The kind answer's distribution, or None unless it is complete and consistent.
+
+    Mirrors the provider's own validation (every option present, finite values in
+    0–1 summing to one within rounding, the chosen option at the top), so a custom
+    provider's partial or malformed distribution is never trusted.
+    """
+    probabilities = kind.get("probabilities")
+    if not isinstance(probabilities, dict) or set(probabilities) != set(KINDS):
+        return None
+    values = {}
+    for key, value in probabilities.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if not 0 <= value <= 1 or not math.isfinite(value):
+            return None
+        values[key] = float(value)
+    if not math.isclose(sum(values.values()), 1.0, abs_tol=0.005 * len(values) + 1e-9):
+        return None
+    if values.get(kind.get("value"), -1.0) + 0.01 + 1e-9 < max(values.values()):
+        return None
+    return values
+
+
 def definite_kind(kind: dict, floor: float = KIND_CONFIDENCE) -> bool:
     """Whether the kind answer is confidently something other than ``uncertain``.
 
     JEV's choice confidence is a margin between the top two options, so a candidate
     split between fact and preference (0.60/0.39) scores about 0.2 although it is
-    plainly not speculation. When the answer carries a probability for ``uncertain``,
-    the gate asks for ``1 - P(uncertain) >= floor``; otherwise (fixtures, custom
-    providers) it falls back to the top choice's confidence. Either way the top choice
-    must not be ``uncertain``.
+    plainly not speculation. When the answer carries a valid distribution, the gate
+    asks for ``1 - P(uncertain) >= floor``; otherwise (fixtures, custom providers,
+    malformed answers) it falls back to the top choice's confidence. Either way the
+    top choice must not be ``uncertain``.
     """
     if kind.get("value") == "uncertain":
         return False
-    probabilities = kind.get("probabilities")
-    uncertain = probabilities.get("uncertain") if isinstance(probabilities, dict) else None
-    if (
-        isinstance(uncertain, (int, float))
-        and not isinstance(uncertain, bool)
-        and 0 <= uncertain <= 1
-    ):
-        return 1 - uncertain >= floor
+    probabilities = _kind_probabilities(kind)
+    if probabilities is not None:
+        return 1 - probabilities["uncertain"] >= floor
     return _confidence(kind) >= floor
+
+
+KEEP_CONFIDENCE = 0.82
+# Assistant/tool output is a proposal, never independent evidence.
+UNPROMOTED_ROLES = ("assistant", "tool", "synthesis")
+
+
+def activates(keep: dict, kind: dict, role: str) -> bool:
+    """The intake gate: a confident keep, a definite kind and a first-hand role."""
+    return (
+        keep.get("value") == "keep"
+        and _confidence(keep) >= KEEP_CONFIDENCE
+        and definite_kind(kind)
+        and role not in UNPROMOTED_ROLES
+    )
 
 
 def _tokens(text: str) -> set[str]:
@@ -460,13 +494,7 @@ class Engine:
                     if keep["value"] == "discard" and confidence >= 0.82:
                         continue
                     role = source.get("metadata", {}).get("role", "document")
-                    # Assistant/tool output is a proposal, never independent evidence.
-                    active = (
-                        keep["value"] == "keep"
-                        and confidence >= 0.82
-                        and definite_kind(kind)
-                        and role not in ("assistant", "tool", "synthesis")
-                    )
+                    active = activates(keep, kind, role)
                     claim_id = hashlib.sha256(
                         f"{source_id}:{span['start']}:{span['end']}:{RUBRIC_VERSION}".encode()
                     ).hexdigest()
@@ -510,6 +538,26 @@ class Engine:
             "active": sum(c["status"] == "active" for c in claims),
             "review": sum(c["status"] == "review" for c in claims),
         }
+
+    def reclassify(self) -> dict:
+        """Promote review claims that the current intake gate would now activate.
+
+        Completed sources are never re-asked, so a gate change (such as the kind gate
+        reading ``P(uncertain)``) would otherwise reach only new sources. This replays
+        the stored decisions of claims intake left in review. It skips claims with a
+        review reason (superseded or forgotten sources), claims from an older rubric,
+        and any claim a caller has already updated, so a manual demotion stands.
+        """
+
+        def admits(claim: dict, source: dict) -> bool:
+            decisions = claim.get("decisions") or {}
+            role = source.get("metadata", {}).get("role", "document")
+            return activates(decisions.get("keep") or {}, decisions.get("kind") or {}, role)
+
+        promoted = len(self.store.promote_review_claims(RUBRIC_VERSION, admits))
+        if promoted:
+            self.store.render()
+        return {"promoted": promoted}
 
     def _defer(self, source_id: str, reason: str, *, render: bool = False) -> dict:
         """Do not turn concurrent completion or retraction into a failed worker."""
