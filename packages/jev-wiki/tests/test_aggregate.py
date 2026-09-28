@@ -127,6 +127,25 @@ class AggregateRecallTests(unittest.TestCase):
         self.assertEqual([i["text"] for i in plain["items"]].count(gym), 1)
         self.assertEqual([i["text"] for i in counted["items"]].count(gym), 3)
 
+    def test_repeated_copies_do_not_use_up_the_tail(self):
+        temporary = tempfile.TemporaryDirectory(prefix="jev-wiki-aggregate-")
+        self.addCleanup(temporary.cleanup)
+        engine = Engine(Path(temporary.name), LifecycleDecisionFixture())
+        copy = "Charity fun runs: I did charity fun runs."
+        runs = [f"I did a run number {i} in the park." for i in range(40)]
+        engine.ingest("\n\n".join([copy] * 100 + runs), source_key="log")
+        self.assertGreater(len(engine.store.claims()), 100)
+        result = engine.recall(
+            "How many charity fun runs did I do?",
+            limit=5,
+            max_chars=20_000,
+            offline=True,
+            aggregate_limit=30,
+        )
+        texts = [i["text"] for i in result["items"]]
+        self.assertEqual(texts.count(copy), 1)
+        self.assertEqual(len(texts), 30)
+
     def test_invalid_aggregate_limits_are_rejected(self):
         for value in (0, MAX_AGGREGATE_LIMIT + 1, True, 2.5):
             with self.assertRaises(ValueError):
