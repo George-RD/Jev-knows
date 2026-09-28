@@ -12,8 +12,9 @@ Systems (all see only the user's turns, as the other harnesses do, so
   are about 16k tokens, so they fit in the reader's context whole.
 - ``bm25``: the five chats BM25 ranks highest for the question, dated. Plain RAG.
 - ``jev``: jev-wiki with keep-everything intake and offline recall (BM25 plus the local
-  embedder when ``JEV_WIKI_EMBEDDING_MODEL`` is set), aggregating up to 40 claims for
-  counting and date questions, as the CLI does by default. No JEV calls.
+  embedder when ``JEV_WIKI_EMBEDDING_MODEL`` is set) at the CLI's defaults: up to 40
+  claims for counting and date questions, the claims next to each recalled one, and
+  extra claims from a named date window. No JEV calls.
 - ``jev_live``: jev-wiki with real JEV intake at the shipped gates, then the same
   offline recall. Calls TypeSafe; the shared response cache answers the questions the
   live sweep already asked, and the report counts paid requests.
@@ -240,6 +241,8 @@ def jev_live_notes(item: dict) -> tuple[str, dict]:
             offline=True,
             aggregate_limit=_CONFIG["aggregate_limit"],
             as_of=qa.iso_date(item["question_date"]),
+            neighbours=_CONFIG["neighbours"],
+            window_claims=_CONFIG["window_claims"],
         )
     notes = "\n".join(
         f"[{n}] (chat date: {date_of[key_of[i['source_id']]]}) "
@@ -295,18 +298,7 @@ def run(task: tuple[str, dict]) -> dict:
     row.update(stats)
     row["notes_seconds"] = round(time.perf_counter() - started, 2)
     row["notes_chars"] = len(notes)
-    prompt = qa.READER_PROMPT.format(
-        notes=notes or "(none)", date=item["question_date"], question=item["question"]
-    )
-    try:
-        row["hypothesis"] = qa.chat(_CONFIG["reader"], prompt)
-        verdict = qa.chat(
-            _CONFIG["judge"], qa.judge_prompt({**item, "answer": row["answer"]}, row["hypothesis"])
-        )
-        row["judge_raw"] = verdict[:200]
-        row["correct"] = "yes" in verdict.lower()
-    except qa._CALL_ERRORS as exc:
-        row["error"] = f"{type(exc).__name__}: {exc}"[:300]
+    row.update(qa.answer(item, notes, _CONFIG["samples"]))
     return row
 
 
@@ -381,7 +373,23 @@ def main() -> int:
     )
     parser.add_argument("--endpoint", default="https://ollama.com/api/chat")
     parser.add_argument("--workers", type=int, default=3)
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=3,
+        help="answers per question from the same notes, graded by majority (default: %(default)s)",
+    )
     parser.add_argument("--aggregate-limit", type=int, default=40)
+    parser.add_argument(
+        "--no-neighbours",
+        action="store_true",
+        help="jev systems: leave out the claims next to each recalled one (CLI default: in)",
+    )
+    parser.add_argument(
+        "--no-window-claims",
+        action="store_true",
+        help="jev systems: leave out extra claims from a named date window (CLI default: in)",
+    )
     parser.add_argument("--jev-model", default="jev-1.13.0")
     parser.add_argument("--jev-cache", default=str(default_cache_dir()))
     parser.add_argument(
@@ -408,6 +416,9 @@ def main() -> int:
         "wiki_model": args.wiki_model,
         "wiki_cache": args.wiki_cache,
         "aggregate_limit": args.aggregate_limit,
+        "samples": args.samples,
+        "neighbours": not args.no_neighbours,
+        "window_claims": not args.no_window_claims,
         "jev_model": args.jev_model,
         "jev_cache": args.jev_cache,
     }
