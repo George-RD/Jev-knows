@@ -68,8 +68,8 @@ missing was the other mentions within those sessions.
 
 ## Next
 
-- Turn `aggregate_limit=60` on by default for CLI recall. It helps counting and date
-  questions and leaves the rest unchanged, apart from the abstention cost above.
+- Done: CLI recall now aggregates by default, at 40 claims after a rerun on main
+  ([aggregate-recall-default-2026-09-28.md](aggregate-recall-default-2026-09-28.md)).
 - Temporal still trails the oracle by 9 points, and more claims stopped helping past
   40. Those failures look like arithmetic over the right notes, not missing notes.
 

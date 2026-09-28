@@ -15,7 +15,9 @@ Context modes:
 - ``wiki``: the claims ``Engine.recall(offline=True)`` returns (up to 20, 20k chars), each
   prefixed with the date of the chat it came from. An agent's memory knows when a note was
   captured; LongMemEval's temporal questions are unanswerable without it.
-  ``--aggregate-limit N`` lets counting and date questions recall up to N claims.
+  ``--aggregate-limit N`` lets counting and date questions recall up to N claims. Each
+  chat is ingested with its date and recall runs as of the question's date, so "two
+  weeks ago" resolves the way it would have that day.
   ``--live`` instead runs the shipped pipeline: JEV intake with the shipped keep gate, then
   recall with the JEV rerank at ``--min-relevance``. That spends TypeSafe credits, so it
   goes through the same shared response cache as ``longmemeval.py`` (``--cache-dir``);
@@ -157,6 +159,11 @@ def judge_prompt(item: dict, response: str) -> str:
     return template.format(question=item["question"], answer=item["answer"], response=response)
 
 
+def iso_date(longmemeval_date: str) -> str:
+    """'2023/05/30 (Tue) 23:40' -> '2023-05-30'."""
+    return longmemeval_date.split(" ", 1)[0].replace("/", "-")
+
+
 def wiki_notes(item: dict) -> tuple[str, dict]:
     """Recall from a fresh wiki; return dated notes and session recall.
 
@@ -183,7 +190,8 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
                 expected.add(key)
             text = session_text(session)
             if text:
-                result = engine.ingest(text, source_key=key, title=key, metadata={"role": "user"})
+                metadata = {"role": "user", "date": iso_date(date)}
+                result = engine.ingest(text, source_key=key, title=key, metadata=metadata)
                 statuses[result["status"]] += 1
         if live and set(statuses) - {"complete"}:
             raise IntakeIncomplete(f"ingestion incomplete: {dict(statuses)}")
@@ -199,6 +207,7 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
             max_chars=20_000,
             offline=not live,
             aggregate_limit=_CONFIG.get("aggregate_limit"),
+            as_of=iso_date(item["question_date"]),
             min_relevance=MIN_RELEVANCE if not live else _CONFIG["min_relevance"],
         )
     keys = [key_of[i["source_id"]] for i in result["items"]]
@@ -210,6 +219,7 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
     stats = {
         "claims": len(result["items"]),
         "aggregate": result["aggregate"],
+        "time_window": result["time_window"],
         "recall_any@10": retrieval.get("recall_any@10"),
     }
     if live:

@@ -11,6 +11,10 @@ Setup: the 30 live-sweep questions (`--per-type 5 --seed 0 --no-abstention`, the
 selection as `longmemeval.py`), `jev-1.13.0`, rubric `wiki-v3`, reader `gpt-oss:120b`, judge
 `glm-5.3` (both at temperature 0, so identical notes give identical answers), embedder
 `minishlab/potion-retrieval-32M` when on.
+These runs predate dated recall (PR #21): chats were ingested without a date and recall
+was not anchored to the question's date. Dated ingest leaves the JEV requests unchanged
+(a rerun still replays from the cache), but recall packing for questions with a relative
+date can differ.
 
     JEV_WIKI_EMBEDDING_MODEL=default python examples/longmemeval_qa.py \
         --data longmemeval_s_cleaned.json --per-type 5 --no-abstention --live \
