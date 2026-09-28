@@ -69,6 +69,33 @@ def _confidence(answer: dict) -> float:
     return float(value) if 0 <= value <= 1 and math.isfinite(value) else 0.0
 
 
+# The kind gate: an active claim must be confidently an assertion rather than speculation.
+KIND_CONFIDENCE = 0.70
+
+
+def definite_kind(kind: dict, floor: float = KIND_CONFIDENCE) -> bool:
+    """Whether the kind answer is confidently something other than ``uncertain``.
+
+    JEV's choice confidence is a margin between the top two options, so a candidate
+    split between fact and preference (0.60/0.39) scores about 0.2 although it is
+    plainly not speculation. When the answer carries a probability for ``uncertain``,
+    the gate asks for ``1 - P(uncertain) >= floor``; otherwise (fixtures, custom
+    providers) it falls back to the top choice's confidence. Either way the top choice
+    must not be ``uncertain``.
+    """
+    if kind.get("value") == "uncertain":
+        return False
+    probabilities = kind.get("probabilities")
+    uncertain = probabilities.get("uncertain") if isinstance(probabilities, dict) else None
+    if (
+        isinstance(uncertain, (int, float))
+        and not isinstance(uncertain, bool)
+        and 0 <= uncertain <= 1
+    ):
+        return 1 - uncertain >= floor
+    return _confidence(kind) >= floor
+
+
 def _tokens(text: str) -> set[str]:
     return set(re.findall(r"[\w]+", text.casefold())) - STOPWORDS
 
@@ -430,8 +457,7 @@ class Engine:
                     active = (
                         keep["value"] == "keep"
                         and confidence >= 0.82
-                        and kind["value"] != "uncertain"
-                        and _confidence(kind) >= 0.70
+                        and definite_kind(kind)
                         and role not in ("assistant", "tool", "synthesis")
                     )
                     claim_id = hashlib.sha256(
