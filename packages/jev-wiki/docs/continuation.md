@@ -23,7 +23,9 @@ and software tests are not evidence of semantic performance.
    embedder on once credits return.
 2. Done in rubric `wiki-v2`: sentence candidates with neighbouring context and exact
    offsets, plus keep wording that values personal facts. See
-   [intake-sentence-claims-2026-09-27.md](intake-sentence-claims-2026-09-27.md).
+   [intake-sentence-claims-2026-09-27.md](intake-sentence-claims-2026-09-27.md). Rubric
+   `wiki-v3` files a request by the personal facts it states; see
+   [intake-requests-2026-09-28.md](intake-requests-2026-09-28.md).
 3. If richer narrative pages materially help recall, add an optional writer that
    proposes cited prose. Validate each supporting span; synthesized answers must
    never become independent corroborating sources.

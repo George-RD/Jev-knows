@@ -67,10 +67,12 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 from jev_wiki import __version__  # noqa: E402
 from jev_wiki.bm25 import bm25_scores  # noqa: E402
 from jev_wiki.engine import (  # noqa: E402
+    KIND_CONFIDENCE,
     RUBRIC_VERSION,
     SHORTLIST_BYTES,
     SHORTLIST_SIZE,
     Engine,
+    definite_kind,
 )
 from jev_wiki.provider import (  # noqa: E402
     JevProvider,
@@ -120,8 +122,8 @@ def jev_rerank(provider: JevProvider, query: str, claims: list[dict]) -> list[di
 
 # Acceptance policies, from the shipped gate to everything JEV did not hard-discard.
 # A threshold t activates a stored claim when JEV's top keep choice is "keep" with
-# confidence >= t and its kind is not "uncertain" and has confidence >= min(t, 0.70).
-# 0.82/0.70 reproduce the engine's gate, so "shipped" is the engine's own result.
+# confidence >= t and its kind is confidently not "uncertain" (definite_kind with floor
+# min(t, 0.70)). 0.82/0.70 reproduce the engine's gate, so "shipped" is the engine's own result.
 POLICIES = (
     ("shipped", None),
     ("keep>=0.75", 0.75),
@@ -143,8 +145,7 @@ def admits(claim: dict, threshold: float | None) -> bool:
     return (
         keep["value"] == "keep"
         and (keep.get("confidence") or 0) >= threshold
-        and kind["value"] != "uncertain"
-        and (kind.get("confidence") or 0) >= min(threshold, 0.70)
+        and definite_kind(kind, min(threshold, KIND_CONFIDENCE))
     )
 
 
@@ -398,6 +399,11 @@ def main() -> int:
         help="Also score _abs questions, as retrieval of their labelled related session; "
         "this does not measure abstention itself.",
     )
+    parser.add_argument(
+        "--types",
+        help="Comma-separated question types to keep from the seeded selection, so a cheap "
+        "subset reuses exactly the questions of the full sweep",
+    )
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--model", default="jev-1.13.0")
     parser.add_argument("--output", required=True)
@@ -428,6 +434,12 @@ def main() -> int:
     data = json.loads(Path(args.data).read_text(encoding="utf-8"))
     chosen = select(data, args.per_type, args.seed, args.include_abstention)
     del data
+    if args.types:
+        wanted = {t.strip() for t in args.types.split(",") if t.strip()}
+        unknown = wanted - {i["question_type"] for i in chosen}
+        if unknown:
+            parser.error(f"unknown question types: {', '.join(sorted(unknown))}")
+        chosen = [i for i in chosen if i["question_type"] in wanted]
     started = time.perf_counter()
     rows, failures = [], []
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
@@ -455,6 +467,7 @@ def main() -> int:
             "per_type": args.per_type,
             "seed": args.seed,
             "include_abstention": args.include_abstention,
+            "types": sorted(wanted) if args.types else None,
             "question_ids": [i["question_id"] for i in chosen],
         },
         "wall_seconds": round(time.perf_counter() - started, 1),

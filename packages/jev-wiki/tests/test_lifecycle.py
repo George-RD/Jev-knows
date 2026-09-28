@@ -9,9 +9,10 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
-from jev_wiki.engine import Engine, candidate_spans
+from jev_wiki.engine import KINDS, Engine, candidate_spans, definite_kind
 from jev_wiki.provider import ProviderError
 
 
@@ -30,6 +31,7 @@ class LifecycleDecisionFixture:
         fail_at=None,
         malformed=None,
         before_answer=None,
+        kind_answer=None,
     ):
         self.keep = keep
         self.kind = kind
@@ -38,6 +40,8 @@ class LifecycleDecisionFixture:
         self.fail_at = fail_at
         self.malformed = malformed
         self.before_answer = before_answer
+        # A full kind answer (value, confidence, probabilities) in place of the default.
+        self.kind_answer = kind_answer
         self.calls = []
 
     def ask(self, state, questions):
@@ -65,7 +69,15 @@ class LifecycleDecisionFixture:
             else:
                 raise AssertionError(f"Unrecognized engine question: {name}")
             answers[name] = {"value": value, "confidence": self.confidence}
+            if name.startswith("kind_") and self.kind_answer is not None:
+                answers[name] = dict(self.kind_answer)
         return answers
+
+
+def kind_answer(value, **probabilities):
+    """A kind answer carrying a complete distribution over the engine's kinds."""
+    distribution = dict.fromkeys(KINDS, 0.0) | probabilities
+    return {"value": value, "confidence": 0.21, "probabilities": distribution}
 
 
 def self_assert_score(question):
@@ -192,6 +204,140 @@ class LifecycleTests(unittest.TestCase):
         result = self.ingest("Project Atlas might use a blue console.")
         self.assertEqual(result["review"], 1)
         self.assertEqual(self.engine.recall("Atlas", offline=True)["items"], [])
+
+    def test_kind_split_between_assertions_is_still_definite(self):
+        # JEV's confidence is a margin: 0.60 preference vs 0.39 fact reads as 0.21,
+        # yet the candidate is plainly not speculation.
+        self.engine.provider = LifecycleDecisionFixture(
+            kind_answer=kind_answer("preference", preference=0.60, fact=0.39, uncertain=0.01)
+        )
+        result = self.ingest("I have been watching a lot of documentaries on Netflix.")
+        self.assertEqual(result["active"], 1)
+
+    def test_likely_speculation_stays_review_even_when_not_top_choice(self):
+        self.engine.provider = LifecycleDecisionFixture(
+            kind_answer=kind_answer("fact", fact=0.40, preference=0.25, uncertain=0.35)
+        )
+        result = self.ingest("Project Atlas might use a blue console, I think.")
+        self.assertEqual(result["active"], 0)
+        self.assertEqual(result["review"], 1)
+
+    def test_definite_kind_reads_only_a_valid_distribution(self):
+        self.assertTrue(definite_kind(kind_answer("fact", fact=0.7, uncertain=0.3)))
+        self.assertFalse(definite_kind(kind_answer("fact", fact=0.69, uncertain=0.31)))
+        self.assertFalse(definite_kind(kind_answer("uncertain", fact=0.2, uncertain=0.8)))
+        # Without a distribution, the top choice's confidence decides.
+        self.assertTrue(definite_kind({"value": "fact", "confidence": 0.70}))
+        self.assertFalse(definite_kind({"value": "fact", "confidence": 0.69}))
+        self.assertFalse(definite_kind({"value": "uncertain", "confidence": 0.99}))
+        valid = kind_answer("fact", fact=0.99, uncertain=0.01)
+        malformed = {
+            "partial": {"fact": 0.9, "uncertain": 0.0},
+            "nan": {**valid["probabilities"], "fact": float("nan")},
+            "bool": {**valid["probabilities"], "uncertain": False},
+            "unnormalised": {**valid["probabilities"], "fact": 0.5},
+            "choice not on top": {**valid["probabilities"], "fact": 0.01, "decision": 0.99},
+        }
+        for name, probabilities in malformed.items():
+            with self.subTest(name):
+                answer = {"value": "fact", "confidence": 0.1, "probabilities": probabilities}
+                self.assertFalse(definite_kind(answer))
+
+    def test_reclassify_promotes_claims_stored_under_the_margin_gate(self):
+        def margin_gate(kind, floor=0.70):
+            return kind.get("value") != "uncertain" and kind.get("confidence", 0) >= floor
+
+        split = kind_answer("preference", preference=0.60, fact=0.39, uncertain=0.01)
+        self.engine.provider = LifecycleDecisionFixture(kind_answer=split)
+        with mock.patch("jev_wiki.engine.definite_kind", margin_gate):
+            self.ingest("I have been watching a lot of documentaries on Netflix.")
+            self.ingest("I keep my bike in the hallway at home.", "demoted")
+            self.ingest(
+                "I keep my notes about Atlas in a green binder.",
+                "assistant",
+                metadata={"role": "assistant"},
+            )
+            self.ingest("My old flat had a blue door.", "superseded")
+        self.assertEqual(self.engine.store.claims(), [])
+        demoted = next(
+            c for c in self.engine.store.claims(active_only=False) if "hallway" in c["text"]
+        )
+        self.engine.store.update_claim(demoted["id"], {"status": "review"})
+        self.ingest("My new flat has a red door.", "superseded")  # supersedes the blue door
+        before = {c["text"] for c in self.engine.store.claims()}
+
+        self.assertEqual(self.engine.reclassify(), {"promoted": 1})
+        promoted = {c["text"] for c in self.engine.store.claims()} - before
+        self.assertEqual(promoted, {"I have been watching a lot of documentaries on Netflix."})
+        self.assertEqual(self.engine.reclassify(), {"promoted": 0})
+
+    def test_reclassify_replays_the_previous_intake_rubric_only(self):
+        # wiki-v3 only reworded the kind question, so wiki-v2 answers still replay.
+        def margin_gate(kind, floor=0.70):
+            return kind.get("value") != "uncertain" and kind.get("confidence", 0) >= floor
+
+        split = kind_answer("preference", preference=0.60, fact=0.39, uncertain=0.01)
+        self.engine.provider = LifecycleDecisionFixture(kind_answer=split)
+        with mock.patch("jev_wiki.engine.definite_kind", margin_gate):
+            with mock.patch("jev_wiki.engine.RUBRIC_VERSION", "wiki-v2"):
+                self.ingest("I have been watching a lot of documentaries on Netflix.")
+            with mock.patch("jev_wiki.engine.RUBRIC_VERSION", "wiki-v1"):
+                self.ingest("I keep my bike in the hallway at home.", "v1")
+        self.assertEqual(self.engine.store.claims(), [])
+
+        self.assertEqual(self.engine.reclassify(), {"promoted": 1})
+        self.assertEqual(
+            [c["text"] for c in self.engine.store.claims()],
+            ["I have been watching a lot of documentaries on Netflix."],
+        )
+
+    def test_reclassify_ignores_forgotten_sources_whose_raw_text_is_gone(self):
+        def margin_gate(kind, floor=0.70):
+            return kind.get("value") != "uncertain" and kind.get("confidence", 0) >= floor
+
+        split = kind_answer("preference", preference=0.60, fact=0.39, uncertain=0.01)
+        self.engine.provider = LifecycleDecisionFixture(kind_answer=split)
+        with mock.patch("jev_wiki.engine.definite_kind", margin_gate):
+            self.ingest("I have been watching a lot of documentaries on Netflix.")
+            self.ingest("My old flat had a blue door.", "gone")
+        gone = next(s for s in self.engine.store.sources() if s["source_key"] == "gone")
+        self.engine.forget("gone")
+        (self.root / gone["path"]).unlink()
+        self.assertEqual(self.engine.reclassify(), {"promoted": 1})
+
+    def test_reclassify_leaves_curated_claims_alone(self):
+        def margin_gate(kind, floor=0.70):
+            return kind.get("value") != "uncertain" and kind.get("confidence", 0) >= floor
+
+        split = kind_answer("preference", preference=0.60, fact=0.39, uncertain=0.01)
+        self.engine.provider = LifecycleDecisionFixture(kind_answer=split)
+        with mock.patch("jev_wiki.engine.definite_kind", margin_gate):
+            self.ingest("I have been watching a lot of documentaries on Netflix.")
+        claim = self.engine.store.claims(active_only=False)[0]
+        self.engine.store.put_claims(claim["source_id"], [claim])
+        self.assertEqual(self.engine.reclassify(), {"promoted": 0})
+
+    def test_update_during_reclassify_is_not_overwritten(self):
+        # Eligibility is decided under the store lock, after any earlier update landed.
+        def margin_gate(kind, floor=0.70):
+            return kind.get("value") != "uncertain" and kind.get("confidence", 0) >= floor
+
+        split = kind_answer("preference", preference=0.60, fact=0.39, uncertain=0.01)
+        self.engine.provider = LifecycleDecisionFixture(kind_answer=split)
+        with mock.patch("jev_wiki.engine.definite_kind", margin_gate):
+            self.ingest("I have been watching a lot of documentaries on Netflix.")
+        claim = self.engine.store.claims(active_only=False)[0]
+        original = self.engine.store.promote_review_claims
+
+        def demote_first(*args, **kwargs):
+            self.engine.store.update_claim(
+                claim["id"], {"status": "review", "review_reason": "user_rejected"}
+            )
+            return original(*args, **kwargs)
+
+        with mock.patch.object(self.engine.store, "promote_review_claims", demote_first):
+            self.assertEqual(self.engine.reclassify(), {"promoted": 0})
+        self.assertEqual(self.engine.store.claims(), [])
 
     def test_assistant_tool_and_synthesis_are_not_promoted_to_facts(self):
         for role in ("assistant", "tool", "synthesis"):
