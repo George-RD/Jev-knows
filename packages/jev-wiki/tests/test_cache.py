@@ -112,8 +112,22 @@ class CacheTests(unittest.TestCase):
             report = json.loads(output.read_text())
             self.assertEqual(report["cache"]["enabled"], enabled)
 
+    def test_harness_default_cache_dir_prefers_env_then_shared_folder(self):
+        shared = Path(self._tmp.name) / "project-files"
+        with patch.object(longmemeval, "SHARED_FOLDER", shared):
+            with patch.dict(os.environ, {"JEV_WIKI_CACHE_DIR": str(self.directory)}):
+                self.assertEqual(longmemeval.default_cache_dir(), self.directory)
+            with patch.dict(os.environ, {"JEV_WIKI_CACHE_DIR": ""}):
+                self.assertNotEqual(longmemeval.default_cache_dir().parent.name, "jev-cache")
+                shared.mkdir()
+                self.assertEqual(
+                    longmemeval.default_cache_dir(), shared / "jev-cache" / "longmemeval"
+                )
+
     def test_harness_default_cache_dir_honours_xdg(self):
-        with patch.dict(os.environ, {"XDG_CACHE_HOME": self._tmp.name}):
+        env = {"XDG_CACHE_HOME": self._tmp.name, "JEV_WIKI_CACHE_DIR": ""}
+        missing = Path(self._tmp.name) / "no-shared-folder"
+        with patch.dict(os.environ, env), patch.object(longmemeval, "SHARED_FOLDER", missing):
             self.assertEqual(
                 longmemeval.default_cache_dir(),
                 Path(self._tmp.name) / "jev-wiki" / "longmemeval",
