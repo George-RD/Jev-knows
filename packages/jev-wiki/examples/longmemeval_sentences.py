@@ -138,8 +138,11 @@ def score(task: tuple[dict, dict]) -> dict:
         sentence = labels["sentences"][index]
         text = _normal(sentence["text"])
         # Sentence splitting may differ at a turn edge, so containment either way counts.
+        # A recalled claim inside the sentence counts only if it holds most of it.
         found = any(
-            sid == sentence["sid"] and (text in got or got in text) for sid, got in recalled
+            sid == sentence["sid"]
+            and (text in got or (got in text and 2 * len(got) >= len(text)))
+            for sid, got in recalled
         )
         needed.append({**sentence, "found": found, "chat_found": sentence["sid"] in chats})
     return {
