@@ -66,6 +66,8 @@ def _parser() -> argparse.ArgumentParser:
     maintain = commands.add_parser("maintain", help="Run bounded relation checks")
     maintain.add_argument("--max-pairs", type=int, default=20)
     commands.add_parser("lint", help="Check provenance and wiki integrity")
+    cache = commands.add_parser("cache", help="Show or clear the JEV response cache")
+    cache.add_argument("--clear", action="store_true", help="Delete every cached response")
     forget = commands.add_parser("forget", help="Forget a source key and cancel its queued event")
     forget.add_argument("--source-key", required=True)
     hook = commands.add_parser("hook", help="Claude Code stdin/stdout adapter; always fails open")
@@ -74,12 +76,16 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _cache_dir(args: argparse.Namespace) -> Path:
+    return args.root / "cache" / "jev"
+
+
 def _provider(args: argparse.Namespace) -> Any:
     if args.provider == "none" or (args.provider == "auto" and not os.getenv("TYPESAFE_API_KEY")):
         return None
     from .provider import JevProvider
 
-    options: dict[str, Any] = {"cache_dir": args.root / "cache" / "jev"}
+    options: dict[str, Any] = {"cache_dir": _cache_dir(args)}
     if args.model:
         options["model"] = args.model
     return JevProvider(**options)
@@ -119,6 +125,11 @@ def _process_pending(engine: Any, limit: int) -> dict[str, Any]:
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     """Run an ordinary CLI command. The hook branch is isolated in main()."""
+    if args.command == "cache":
+        from .provider import cache_stats, clear_cache
+
+        removed = clear_cache(_cache_dir(args)) if args.clear else 0
+        return {**cache_stats(_cache_dir(args)), "removed": removed}
     from .engine import Engine
 
     use_provider = args.command in {"ingest", "process", "worker", "maintain", "recall"}
