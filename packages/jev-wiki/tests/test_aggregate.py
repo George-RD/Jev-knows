@@ -146,6 +146,26 @@ class AggregateRecallTests(unittest.TestCase):
         self.assertEqual(texts.count(copy), 1)
         self.assertEqual(len(texts), 30)
 
+    def test_short_claims_fill_the_budget_past_long_ones(self):
+        temporary = tempfile.TemporaryDirectory(prefix="jev-wiki-aggregate-")
+        self.addCleanup(temporary.cleanup)
+        engine = Engine(Path(temporary.name), LifecycleDecisionFixture())
+        filler = " ".join(["and it was a long and very scenic course"] * 8)
+        long_runs = [f"I did charity fun run {i} {filler}." for i in range(80)]
+        short_runs = [f"Fun run {i} done." for i in range(20)]
+        engine.ingest("\n\n".join(long_runs), source_key="long")
+        engine.ingest("\n\n".join(short_runs), source_key="short")
+        result = engine.recall(
+            "How many charity fun runs did I do?",
+            limit=5,
+            max_chars=4_000,
+            offline=True,
+            aggregate_limit=30,
+        )
+        texts = [i["text"] for i in result["items"]]
+        self.assertTrue(any(t.startswith("Fun run") for t in texts), texts[-3:])
+        self.assertLessEqual(len(result["context"]), 4_000)
+
     def test_invalid_aggregate_limits_are_rejected(self):
         for value in (0, MAX_AGGREGATE_LIMIT + 1, True, 2.5):
             with self.assertRaises(ValueError):
