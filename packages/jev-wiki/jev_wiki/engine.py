@@ -399,7 +399,8 @@ _COUNTS = {
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 _RELATIVE = re.compile(
     r"\b(?:(?P<n>\d{1,3}|" + "|".join(sorted(_COUNTS, key=len, reverse=True)) + r")\s+"
-    r"(?P<unit>day|week|month|year)s?\s+ago|(?P<yesterday>yesterday)|"
+    r"(?P<unit>day|week|month|year)s?\s+ago|(?P<yesterday>(?:the\s+)?day\s+before\s+"
+    r"yesterday|yesterday)|"
     r"the\s+(?:last|past)\s+(?P<span>week|month|year)|last\s+"
     r"(?P<last>week|weekend|month|year|" + "|".join(_WEEKDAYS) + r"))\b",
     re.I,
@@ -433,7 +434,9 @@ def time_window(query: str, as_of: date) -> dict | None:
         target, slack = as_of - timedelta(days=count * _UNIT_DAYS[unit]), _SLACK[unit]
         start, end = target - timedelta(days=slack), target + timedelta(days=slack)
     elif match["yesterday"]:
-        start = end = as_of - timedelta(days=1)
+        # A day either side: today and capture times are UTC, the asker's day may not be.
+        day = as_of - timedelta(days=2 if "before" in match["yesterday"].lower() else 1)
+        start, end = day - timedelta(days=1), day + timedelta(days=1)
     elif match["span"]:  # "in the past month": up to today.
         start, end = as_of - timedelta(days=_UNIT_DAYS[match["span"].lower()]), as_of
     else:
@@ -698,7 +701,8 @@ class Engine:
         Each block and item carries its source's date (``source_date``). A query naming a
         relative date ("10 days ago", "last Saturday") is resolved against ``as_of``
         (default: today, UTC), and claims from sources dated in that window are packed
-        first, keeping their order among themselves.
+        first, keeping their order among themselves. At ``limit`` or ``max_chars`` they
+        displace better-ranked claims from outside the window.
         """
         if not isinstance(query, str) or not query.strip() or len(query) > 2000:
             raise ValueError("query must contain 1–2000 characters")

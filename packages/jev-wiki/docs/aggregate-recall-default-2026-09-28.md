@@ -75,13 +75,17 @@ calling `jev-wiki recall` had no way to answer "when" or "N weeks ago".
   caller supplies one at ingest (an ISO 8601 date: when it happened), otherwise the
   capture time.
 - `recall(..., as_of=...)` (default today, UTC) resolves a relative date in the query:
-  "10 days ago", "two weeks ago", "a month ago", "yesterday", "last Saturday", "last
+  "10 days ago", "two weeks ago", "a month ago", "yesterday" (and the day before),
+  "last Saturday", "last
   weekend", "last week/month/year" (the calendar period), "in the past month" (up to
   today). Counted phrases allow rounding: a day either side for days, three for weeks,
-  ten for months. `time_window()` does this with one regex, no model call. The result
+  ten for months; named days allow one either side, since today and capture times are
+  UTC. `time_window()` does this with one regex, no model call. The result
   reports the window as `time_window`.
 - Claims from sources dated in that window are packed first, keeping their ranked
-  order. Nothing is added or dropped, only reordered, and the JEV request is unchanged.
+  order. No new candidates are added, and the JEV request is unchanged, but when the
+  limit or `max_chars` is reached, in-window claims take the places of better-ranked
+  claims from other dates. That's the intent: the question named the date.
 
 On the 33 LongMemEval questions with such a phrase (up to 40 claims, three reader
 samples each), accuracy went from 0.747 to 0.778. The notes changed for 23 of them.

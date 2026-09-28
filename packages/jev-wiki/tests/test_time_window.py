@@ -26,7 +26,8 @@ class TimeWindowTests(unittest.TestCase):
         self.assertEqual(span("a couple of days ago"), ("2023-05-27", "2023-05-29"))
 
     def test_named_days_resolve_to_the_most_recent_one(self):
-        self.assertEqual(span("Who called yesterday?"), ("2023-05-29", "2023-05-29"))
+        self.assertEqual(span("Who called yesterday?"), ("2023-05-28", "2023-05-30"))
+        self.assertEqual(span("the day before yesterday"), ("2023-05-27", "2023-05-29"))
         self.assertEqual(span("lunch last Tuesday"), ("2023-05-22", "2023-05-24"))
         self.assertEqual(span("dinner last Monday"), ("2023-05-28", "2023-05-30"))
         self.assertEqual(span("What did I cook last weekend?"), ("2023-05-26", "2023-05-29"))
@@ -86,6 +87,11 @@ class DatedRecallTests(unittest.TestCase):
         self.assertEqual(
             sorted(i["id"] for i in plain["items"]), sorted(i["id"] for i in dated["items"])
         )
+
+    def test_the_window_wins_places_at_the_limit(self):
+        query = "Which charity fun run did I do two weeks ago?"
+        dated = self.engine.recall(query, limit=1, offline=True, as_of=TUESDAY)
+        self.assertEqual([i["date"] for i in dated["items"]], ["2023-05-16"])
 
     def test_invalid_as_of_is_rejected(self):
         with self.assertRaises(ValueError):
