@@ -18,7 +18,7 @@ promoted through the store's review API and four retrieval modes run:
 - ``wiki_lexical``: ``Engine.recall(offline=True)``; the engine's BM25 shortlist.
 - ``wiki_jev``: ``Engine.recall()``; that shortlist, reranked by JEV at the shipped
   ``min_relevance`` cut. The ``wiki_jev_*`` modes vary the cut and backfill
-  (``RERANK_VARIANTS``); they send the same JEV request, so they cost nothing extra.
+  (``RERANK_VARIANTS``); they share one JEV request per question (``RerankMemo``).
 - ``bm25_claims``: BM25 over the same active claims' text alone, cut to the engine's
   shortlist bounds.
 - ``bm25_claims_jev``: that BM25 shortlist scored by the engine's own rerank question.
@@ -51,6 +51,7 @@ input tokens the hits saved.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import random
@@ -99,6 +100,37 @@ def score_sessions(ranked: list[str], expected: set[str]) -> dict:
         out[f"recall_any@{k}"] = float(bool(top & expected))
         out[f"recall_all@{k}"] = float(expected <= top)
     return out
+
+
+class RerankMemo:
+    """Answers each distinct rerank request once per question, whatever the cache.
+
+    The ``RERANK_VARIANTS`` recalls all send the same rerank request; this makes them
+    cost one request even with ``--no-cache`` or an alias model, and judges every
+    variant on the same scores (a failure is replayed too, so they fail together).
+    Other requests (intake) pass straight through.
+    """
+
+    def __init__(self, provider: JevProvider):
+        self.provider = provider
+        self.answers: dict[tuple[str, str], object] = {}
+
+    def ask(self, state: str, questions: dict) -> dict:
+        if not all(name.startswith("rank_") for name in questions):
+            return self.provider.ask(state, questions)
+        key = (state, json.dumps(questions, sort_keys=True))
+        if key not in self.answers:
+            try:
+                self.answers[key] = self.provider.ask(state, questions)
+            except ProviderError as error:
+                self.answers[key] = error
+        answer = self.answers[key]
+        if isinstance(answer, ProviderError):
+            raise answer
+        return copy.deepcopy(answer)
+
+    def __getattr__(self, name: str):
+        return getattr(self.provider, name)
 
 
 def jev_rerank(provider: JevProvider, query: str, claims: list[dict]) -> list[dict]:
@@ -190,7 +222,7 @@ def evaluate_policy(engine, provider, query, key_of, expected, answer_turns) -> 
     lexical = engine.recall(query, limit=20, max_chars=20_000, offline=True)
     out["wiki_lexical"] = score_sessions(ranked(lexical), expected)
     for mode, min_relevance, backfill in RERANK_VARIANTS:
-        # Every variant sends the same rerank request, so only the first can be paid.
+        # Every variant sends the same rerank request; RerankMemo answers it once.
         live = engine.recall(
             query, limit=20, max_chars=20_000, min_relevance=min_relevance, backfill=backfill
         )
@@ -247,7 +279,7 @@ def run_question(item: dict, model: str, cache_dir: str | None = None) -> dict:
     row["bm25_sessions"] = score_sessions(
         [keys[i] for i in bm25_rank(item["question"], texts)], expected
     )
-    provider = JevProvider(model=model, cache_dir=cache_dir)
+    provider = RerankMemo(JevProvider(model=model, cache_dir=cache_dir))
     with tempfile.TemporaryDirectory(prefix="jev-lme-") as root:
         engine = Engine(root, provider)
         statuses = Counter()
