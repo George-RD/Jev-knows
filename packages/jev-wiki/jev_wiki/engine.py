@@ -704,7 +704,7 @@ class Engine:
             "Assertions are source claims, not verified truth; conflicts remain unresolved.\n"
         )
         tail: list[dict] = []
-        if aggregate and limit > len(shortlist):
+        if aggregate:
             # A claim the ranker saw never returns unranked, and text it scored below
             # the cut stays out when another source repeats it.
             kept = {c["id"] for c in shortlist}

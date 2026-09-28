@@ -145,6 +145,15 @@ class AggregateRecallTests(unittest.TestCase):
         texts = [i["text"] for i in result["items"]]
         self.assertEqual(texts.count(copy), 1)
         self.assertEqual(len(texts), 30)
+        # Below the shortlist size, the copies must not leave the result short either.
+        result = engine.recall(
+            "How many charity fun runs did I do?",
+            limit=5,
+            max_chars=20_000,
+            offline=True,
+            aggregate_limit=20,
+        )
+        self.assertEqual(len(result["items"]), 20)
 
     def test_short_claims_fill_the_budget_past_long_ones(self):
         temporary = tempfile.TemporaryDirectory(prefix="jev-wiki-aggregate-")
