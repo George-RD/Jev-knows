@@ -116,7 +116,7 @@ def jev_rerank(provider: JevProvider, query: str, claims: list[dict]) -> list[di
 
 # Acceptance policies, from the shipped gate to everything JEV did not hard-discard.
 # A threshold t activates a stored claim when JEV's top keep choice is "keep" with
-# confidence >= t and its kind is not "uncertain" with confidence >= min(t, 0.70).
+# confidence >= t and its kind is not "uncertain" and has confidence >= min(t, 0.70).
 # 0.82/0.70 reproduce the engine's gate, so "shipped" is the engine's own result.
 POLICIES = (
     ("shipped", None),

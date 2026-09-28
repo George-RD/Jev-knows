@@ -31,7 +31,8 @@ ingested).
 ## Keep-threshold sweep
 
 Each row activates every stored claim whose top keep choice is `keep` at or above the
-threshold (and whose kind is not `uncertain` at min(threshold, 0.70)). 20,502
+threshold and whose kind is anything but `uncertain` with confidence at or above
+min(threshold, 0.70). 20,502
 candidates, 15,929 stored claims over 30 questions.
 
 | Keep threshold | Candidates active | Evidence sessions retained | Answer turns active | Lexical recall@10 | JEV rerank recall@10 |
@@ -52,7 +53,7 @@ Reading it for the threshold decision:
 - 0.82 down to 0.7 changes nothing measurable in recall; it only adds 2 points of
   active claims.
 - 0.65 is the first step that gains recall (0.67 to 0.73, two questions) at 30% more
-  active claims than shipped. Below 0.65, recall stays at 0.73 while the store keeps
+  active claims than shipped. Below 0.65, recall stays at 0.70–0.73 while the store keeps
   growing (0.5 activates 1.7 times as many claims, 0.2 about 2.5 times).
 - On 30 questions one question is 0.033, so the whole 0.65–top-choice band is within
   two questions of itself. The step at 0.65 is the only consistent signal.
