@@ -76,5 +76,10 @@ python packages/jev-wiki/examples/longmemeval_qa.py --data longmemeval_s_cleaned
     --per-type 0 --workers 4 --resume wiki.json --output wiki.json
 ```
 
+The numbers above answered each question once. The harness now answers each question
+three times from the same notes and grades it by majority vote (`--samples`, default 3),
+because single answers flip about 6% of verdicts between identical runs; `--samples 1`
+reproduces the runs above at a third of the reader and judge calls.
+
 The wiki run took about 25 minutes at 12 workers. Ollama Cloud limits concurrent
 requests, so more workers produce 429s rather than speed.
