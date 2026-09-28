@@ -629,12 +629,11 @@ class Engine:
         aggregate = aggregate_limit is not None and aggregation_query(query)
         if aggregate:
             limit = max(limit, aggregate_limit)
-        sources = {s["id"]: s for s in self.store.sources()}
-        claims = [
-            {**claim, "source": sources[claim["source_id"]]}
-            for claim in self.store.claims()
-            if claim["source_id"] in sources
-        ]
+        # One unvalidated read for ranking; active_evidence (in load below) revalidates
+        # every claim that is emitted, so tampered evidence still fails closed.
+        current, active = self.store.recall_snapshot()
+        sources = {s["id"]: s for s in current}
+        claims = [{**claim, "source": sources[claim["source_id"]]} for claim in active]
         # BM25 over active claims plus their source titles: rare, repeated query terms
         # outrank common ones, and long claims do not win on length alone. Each title
         # is tokenized once per source and never copied into its claims. Each matching

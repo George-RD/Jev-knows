@@ -236,6 +236,47 @@ for index in range(8):
         with self.assertRaisesRegex(ValueError, "16 MiB"):
             self.store.sources()
 
+    def test_recall_snapshot_matches_validated_reads(self):
+        _, left = self.capture_claim("Atlas has a cobalt console.", "left")
+        _, right = self.capture_claim("Atlas has an amber console.", "right")
+        _, review = self.capture_claim("Maybe Atlas is blue.", "maybe")
+        self.assertTrue(self.store.relate(left["id"], right["id"], {"type": "conflict"}))
+        self.assertTrue(self.store.relate(left["id"], review["id"], {"type": "conflict"}))
+        self.store.update_claim(review["id"], {"status": "review"})
+        self.store.forget("right")
+        sources, claims = self.store.recall_snapshot()
+        self.assertEqual(sources, self.store.sources())
+        self.assertEqual(claims, self.store.claims())
+        self.assertEqual([c["id"] for c in claims], [left["id"]])
+        self.assertEqual(claims[0]["relations"], [])
+
+    def test_recall_snapshot_reuses_parse_only_while_state_is_unchanged(self):
+        _, first = self.capture_claim("Atlas has a cobalt console.", "left")
+        _, claims = self.store.recall_snapshot()
+        claims[0]["text"] = "Mutated by a caller."
+        claims[0]["relations"].append({"target": "x"})
+        _, again = self.store.recall_snapshot()
+        self.assertEqual(again[0]["text"], "Atlas has a cobalt console.")
+        self.assertEqual(again[0]["relations"], [])
+        self.assertIn(first["id"], self.store.active_evidence([first["id"]]))
+        self.store.update_claim(first["id"], {"status": "review"})
+        self.assertEqual(self.store.recall_snapshot()[1], [])
+        self.assertEqual(self.store.active_evidence([first["id"]]), {})
+
+    def test_recall_ranks_unvalidated_but_emits_only_revalidated_evidence(self):
+        from jev_wiki.engine import Engine
+
+        self.capture_claim("George prefers concise answers.", "profile")
+        other, _ = self.capture_claim("Atlas has a cobalt console.", "atlas")
+        (self.root / other["path"]).write_text("Tampered content.")
+        engine = Engine(self.root)
+        # The tampered source is never emitted, so recall of other evidence still works.
+        result = engine.recall("concise answers", offline=True)
+        self.assertEqual([i["text"] for i in result["items"]], ["George prefers concise answers."])
+        # Emitting the tampered claim fails closed, as the full read did.
+        with self.assertRaisesRegex(ValueError, "hash mismatch"):
+            engine.recall("cobalt console", offline=True)
+
     def test_tampered_claim_fails_final_evidence_validation(self):
         _, claim = self.capture_claim()
         state_path = self.root / "state.json"
