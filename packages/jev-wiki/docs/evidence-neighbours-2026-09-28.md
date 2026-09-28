@@ -99,7 +99,29 @@ beats neighbours.
 
 ## QA
 
-QA_RESULTS
+All 500 questions through the QA harness's reader and judge (`gpt-oss:120b`,
+`glm-5.3`), up to 40 claims, both arms from the same wikis. Neighbours changed the notes
+for every question, so every question was answered in both arms.
+
+| Type | n | without | with neighbours |
+|---|---:|---:|---:|
+| multi-session | 121 | 0.777 | 0.818 |
+| temporal-reasoning | 127 | 0.850 | 0.866 |
+| knowledge-update | 72 | 0.889 | 0.958 |
+| single-session-user | 63 | 0.952 | 0.984 |
+| single-session-assistant | 56 | 0.286 | 0.357 |
+| single-session-preference | 30 | 0.667 | 0.767 |
+| abstention | 30 | 0.733 | 0.633 |
+| **all** | 499 | 0.770 | **0.806** |
+
+One question errored in one arm and is left out. Neighbours turned 31 wrong answers
+right and 13 right answers wrong (sign test p = 0.01), well past the reader's 6%
+run-to-run noise. Abstention was the only type to drop, so its 30 questions were
+answered twice more in both arms: over three samples it is 0.678 without and 0.644
+with, about one question, which is within noise. More true context gives the reader
+a little more to wrongly answer from, and that's worth watching.
+
+Mean notes: 32.6 claims and 7,244 characters without, 48.8 and 10,574 with.
 
 ## Defaults
 
