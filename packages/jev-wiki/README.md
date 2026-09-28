@@ -52,6 +52,10 @@ reads the model memory-mapped (about 0.1 s), and reads claim vectors that `worke
 `recall` save under `<root>/embeddings/`. If loading or encoding new claims would run
 past 0.55 s of the hook's 0.75 s budget, that prompt's recall stays lexical. See
 [docs/hook-embeddings-2026-09-27.md](docs/hook-embeddings-2026-09-27.md).
+The hook answers within its budget up to at least 10,000 claims (0.41 s lexical,
+0.55 s with embeddings), because recall ranks from one unvalidated read and revalidates
+only the claims it returns. See
+[docs/hook-store-read-2026-09-28.md](docs/hook-store-read-2026-09-28.md).
 
 Questions that count, total, order or date events ("how many weddings did I go to",
 "which did I start first") need every mention, not the best few. CLI `recall` gives

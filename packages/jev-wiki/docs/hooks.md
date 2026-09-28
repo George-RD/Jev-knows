@@ -86,6 +86,8 @@ proposal and is not promoted to independent evidence. Handwritten notes under
   only JSON, exits zero, and supplies no permission or continuation decision.
   A 750 ms local wall-clock budget also interrupts blocked reads or store locks.
   The two-second host timeout is an additional bound and can discard late output.
+  Recall fits that budget up to at least 10,000 claims; see
+  [hook-store-read-2026-09-28.md](hook-store-read-2026-09-28.md).
 - `inbox/hooks/` contains pending message text. Receipts contain only an event
   hash and state. A stable hash of project, session, event, role, and text makes
   retries idempotent, including across worker crashes. Identical repeated text
