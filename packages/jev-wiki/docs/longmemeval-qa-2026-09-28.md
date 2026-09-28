@@ -57,7 +57,8 @@ Eight of them are preference questions. They are left out of that column's accur
 ## Next
 
 - Try a larger or adaptive recall limit for counting and "how many" questions, and
-  rerun this harness. It costs no TypeSafe credits.
+  rerun this harness. Done: [aggregate recall](aggregate-recall-2026-09-28.md) lifts
+  the overall score to 0.778 and multi-session to 0.818.
 - Run it with live intake (the shipped keep policy) to measure what intake loses on top
   of recall. That costs the same JEV calls as the retrieval sweep.
 - For conflict resolution beyond LongMemEval's knowledge-update type, MemoryAgentBench's
