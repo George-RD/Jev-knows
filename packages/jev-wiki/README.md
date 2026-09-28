@@ -65,6 +65,13 @@ and `--aggregate-limit 0` turns it off. On LongMemEval it lifts answer accuracy 
 0.754 to 0.776 ([aggregate recall](docs/aggregate-recall-2026-09-28.md),
 [default](docs/aggregate-recall-default-2026-09-28.md)).
 
+The sentence that answers a question often shares no words with it: "I got it a month
+ago" follows the sentence naming the ring. CLI `recall` follows each recalled claim
+with the claims either side of it in its source, marked `neighbour_of`, outside
+`--limit` and within a quarter of `--max-chars`; `--no-neighbours` turns this off. On
+LongMemEval it raises the share of answer sentences recalled from 0.887 to 0.930
+([neighbour sentences](docs/evidence-neighbours-2026-09-28.md)).
+
 Every recalled claim carries its source's date: the `date` you pass in ingest
 metadata (when it happened), or else when it was captured. A question naming a
 relative date ("what did I buy 10 days ago", "last Saturday") packs the claims from

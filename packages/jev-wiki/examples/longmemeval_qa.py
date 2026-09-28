@@ -17,7 +17,8 @@ Context modes:
   captured; LongMemEval's temporal questions are unanswerable without it.
   ``--aggregate-limit N`` lets counting and date questions recall up to N claims. Each
   chat is ingested with its date and recall runs as of the question's date, so "two
-  weeks ago" resolves the way it would have that day.
+  weeks ago" resolves the way it would have that day. ``--neighbours`` adds the claims
+  next to each recalled claim (``Engine.recall(neighbours=True)``).
   ``--live`` instead runs the shipped pipeline: JEV intake with the shipped keep gate, then
   recall with the JEV rerank at ``--min-relevance``. That spends TypeSafe credits, so it
   goes through the same shared response cache as ``longmemeval.py`` (``--cache-dir``);
@@ -226,6 +227,7 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
             offline=not live,
             aggregate_limit=_CONFIG.get("aggregate_limit"),
             as_of=iso_date(item["question_date"]),
+            neighbours=bool(_CONFIG.get("neighbours")),
             min_relevance=MIN_RELEVANCE if not live else _CONFIG["min_relevance"],
         )
     keys = [key_of[i["source_id"]] for i in result["items"]]
@@ -238,6 +240,7 @@ def wiki_notes(item: dict) -> tuple[str, dict]:
         "claims": len(result["items"]),
         "aggregate": result["aggregate"],
         "time_window": result["time_window"],
+        "neighbours": result["neighbours"],
         "recall_any@10": retrieval.get("recall_any@10"),
     }
     if live:
@@ -287,6 +290,8 @@ def run_question(item: dict) -> dict:
         notes = ""
     row["recall_seconds"] = round(time.perf_counter() - started, 2)
     row["notes_chars"] = len(notes)
+    if _CONFIG.get("save_notes"):
+        row["notes"] = notes
     prompt = READER_PROMPT.format(
         notes=notes or "(none)", date=item["question_date"], question=item["question"]
     )
@@ -361,6 +366,14 @@ def main() -> int:
         help="wiki mode: recall up to this many claims for counting and date questions",
     )
     parser.add_argument(
+        "--neighbours",
+        action="store_true",
+        help="wiki mode: add the claims next to each recalled claim",
+    )
+    parser.add_argument(
+        "--save-notes", action="store_true", help="keep each question's notes in its row"
+    )
+    parser.add_argument(
         "--live",
         action="store_true",
         help="wiki mode: JEV intake and rerank (paid; cached) instead of offline recall",
@@ -400,6 +413,8 @@ def main() -> int:
         "judge": args.judge,
         "endpoint": args.endpoint,
         "aggregate_limit": args.aggregate_limit,
+        "neighbours": args.neighbours,
+        "save_notes": args.save_notes,
         "live": args.live,
         "min_relevance": args.min_relevance if args.live else None,
         "jev_model": args.jev_model if args.live else None,
