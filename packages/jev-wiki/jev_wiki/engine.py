@@ -658,9 +658,7 @@ class Engine:
                 similarities = None
         candidates = _candidates(claims, scores, lifted, similarities)
         shortlist = _shortlist(candidates)
-        # Claims the ranker saw; one it scored below the cut never returns unranked,
-        # nor does the same text from another source.
-        shortlisted = {c["id"] for c in shortlist} | {c["text"] for c in shortlist}
+        sent = shortlist  # What the ranker sees, before its relevance cut.
         degraded = self.provider is None or offline
         mode = "lexical" if similarities is None else "hybrid"
         if shortlist and self.provider is not None and not offline:
@@ -707,16 +705,17 @@ class Engine:
         )
         ordered = shortlist
         if aggregate and limit > len(shortlist):
+            # A claim the ranker saw never returns unranked, and text it scored below
+            # the cut stays out when another source repeats it.
+            kept = {c["id"] for c in shortlist}
+            shortlisted = {c["id"] for c in sent}
+            rejected = {c["text"] for c in sent if c["id"] not in kept}
             # Unranked candidates follow the ranker's choices, best fused order first.
             # Twice the missing count leaves room for duplicates and claims too large
             # for the remaining budget without loading every candidate's evidence.
             tail = heapq.nsmallest(
                 2 * (limit - len(shortlist)),
-                (
-                    c
-                    for c in candidates
-                    if c["id"] not in shortlisted and c["text"] not in shortlisted
-                ),
+                (c for c in candidates if c["id"] not in shortlisted and c["text"] not in rejected),
                 key=_order,
             )
             ordered = [*shortlist, *tail]
@@ -727,6 +726,9 @@ class Engine:
                 continue
             claim.update(current[claim["id"]])
             digest = hashlib.sha256(claim["text"].encode()).hexdigest()
+            if aggregate:
+                # Counting needs each source's mention, even when the words repeat.
+                digest += claim["source_id"]
             if digest in seen:
                 continue
             # active_evidence rechecked current status, exact quotes and hashes

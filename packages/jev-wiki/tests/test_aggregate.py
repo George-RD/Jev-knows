@@ -116,6 +116,17 @@ class AggregateRecallTests(unittest.TestCase):
         result = engine.recall("How many fun runs did I do?", limit=20, aggregate_limit=40)
         self.assertNotIn(rejected, [i["text"] for i in result["items"]])
 
+    def test_repeated_text_from_each_source_is_counted(self):
+        engine = Engine(self.root, LifecycleDecisionFixture())
+        for day in range(3):
+            engine.ingest("I went to the climbing gym today.", source_key=f"day{day}")
+        query = "How often did I go to the climbing gym?"
+        plain = engine.recall(query, offline=True)
+        counted = engine.recall(query, offline=True, aggregate_limit=30)
+        gym = "I went to the climbing gym today."
+        self.assertEqual([i["text"] for i in plain["items"]].count(gym), 1)
+        self.assertEqual([i["text"] for i in counted["items"]].count(gym), 3)
+
     def test_invalid_aggregate_limits_are_rejected(self):
         for value in (0, MAX_AGGREGATE_LIMIT + 1, True, 2.5):
             with self.assertRaises(ValueError):
