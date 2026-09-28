@@ -63,6 +63,16 @@ def _parser() -> argparse.ArgumentParser:
     recall.add_argument("--limit", type=int, default=5)
     recall.add_argument("--max-chars", type=int, default=6_000)
     recall.add_argument("--offline", action="store_true", help="Use lexical retrieval only")
+    recall.add_argument(
+        "--min-relevance",
+        type=float,
+        help="JEV rerank score (0–3) a claim needs to be kept or promoted (default: 1.5)",
+    )
+    recall.add_argument(
+        "--backfill",
+        action="store_true",
+        help="Keep claims below --min-relevance after the promoted ones, in lexical order",
+    )
     maintain = commands.add_parser("maintain", help="Run bounded relation checks")
     maintain.add_argument("--max-pairs", type=int, default=20)
     commands.add_parser("lint", help="Check provenance and wiki integrity")
@@ -181,7 +191,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return result
     if args.command == "recall":
         return engine.recall(
-            args.query, limit=args.limit, max_chars=args.max_chars, offline=args.offline
+            args.query,
+            limit=args.limit,
+            max_chars=args.max_chars,
+            offline=args.offline,
+            backfill=args.backfill,
+            **({} if args.min_relevance is None else {"min_relevance": args.min_relevance}),
         )
     if args.command == "maintain":
         return engine.maintain(max_pairs=args.max_pairs)
